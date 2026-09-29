@@ -8,15 +8,15 @@
   },
   "xiaomi_base_url": {
     "type": "string",
-    "description": "【图片问答桥接】小米 Token Plan 接口地址（区域）",
-    "hint": "默认中国区。其他区域：`https://token-plan-ams.xiaomimimo.com/v1`（美西）、`https://token-plan-sgp.xiaomimimo.com/v1`（新加坡）",
+    "description": "[图片桥接] 小米 MiMo 接口 Base URL（Token Plan OpenAI 兼容）",
+    "hint": "中国节点 https://token-plan-cn.xiaomimimo.com/v1；新加坡 token-plan-sgp.xiaomimimo.com/v1；欧洲 token-plan-ams.xiaomimimo.com/v1。",
     "default": "https://token-plan-cn.xiaomimimo.com/v1"
   },
   "xiaomi_model": {
     "type": "string",
-    "description": "【图片问答桥接】小米识图模型",
-    "hint": "推荐 `mimo-v2.5`（支持图片理解）；也可填 `mimo-v2.5-pro`",
-    "default": "mimo-v2.5"
+    "description": "[图片桥接] 小米 MiMo 识图模型名（默认 mimo-v2.6-flash）",
+    "hint": "MiMo-V2.6 系列（2026-09-22 发布）：mimo-v2.6-flash（默认，全模态、便宜、适合高频识图）、mimo-v2.6-pro（更强）、mimo-v2.6-pro-ultraspeed（更快）。注意 mimo-v2.5 / mimo-v2.5-pro 将于 2026-10-21 下线。模型名不可用时插件会自动降级尝试（mimo-v2.6-flash → mimo-v2.6-pro → mimo-v2.5）。",
+    "default": "mimo-v2.6-flash"
   },
   "baidu_api_key": {
     "type": "string",

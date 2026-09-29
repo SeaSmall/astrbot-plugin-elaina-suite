@@ -58,3 +58,20 @@
   `guard_retry_provider_id` 语义改为「留空 = 当前会话模型」。
 - `/llmguard`（`/拦截状态`）输出改为显示「重新注入 provider / 尝试次数 / 是否携带人设 / 重新注入成功数」。
 - 同步改动：独立插件 `astrbot-plugin-llm-guard` 已发布 v1.1.0。
+
+## v1.0.2（2026-08-30）
+
+### ✨ 更新：识图默认模型升级到小米 MiMo V2.6
+
+- **背景**：小米于 2026-09-22 发布 **MiMo-V2.6 系列**（`mimo-v2.6-pro` / `mimo-v2.6-flash` /
+  `mimo-v2.6-pro-ultraspeed`）；且 `mimo-v2.5`、`mimo-v2.5-pro` 将于 **2026-10-21 10:00（北京时间）下线**。
+- **变更**：
+  - 识图默认模型 `mimo-v2.5` → **`mimo-v2.6-flash`**（全模态、成本低，适合高频识图）；
+  - Base URL 不变（Token Plan 中国节点 `https://token-plan-cn.xiaomimimo.com/v1`），
+    配置项说明补充新加坡 / 欧洲节点；
+  - **模型名自动降级**：配置的模型若因「模型不存在/已下线」报错，会依次尝试
+    `mimo-v2.6-flash` → `mimo-v2.6-pro` → `mimo-v2.5`（非模型类错误如 401 仍立即抛出，不做无意义重试），
+    避免官方迭代模型名后识图直接失效。
+- **⚠️ 合规提醒**：小米官方文档写明 Token Plan 额度**仅限编程工具使用**，禁止用于自动化脚本 /
+  自定义应用后端；在机器人里使用 Token Plan Key 属受限场景，建议改用标准按量计费 API 的 Key
+  （README 已补充说明）。

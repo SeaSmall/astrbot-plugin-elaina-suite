@@ -88,8 +88,17 @@ DEFAULT_PENDING_TTL = 1800  # 图片识别内容有效期（秒），超时后�
 DEFAULT_EMOJI_WAIT_PENDING = True  # 表情是否也参与「发送后等待提问」门控
 DEFAULT_RECOGNITION_WAIT = 30  # 用户提问时等待图片识别完成的最长时间（秒）
 # 小米 MiMo Token Plan（OpenAI 兼容；Key 格式 tp-xxxxx）
+# 中国节点 https://token-plan-cn.xiaomimimo.com/v1；新加坡 token-plan-sgp / 欧洲 token-plan-ams
 DEFAULT_XIAOMI_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
-DEFAULT_XIAOMI_MODEL = "mimo-v2.5"  # 支持图片理解；也可用 mimo-v2.5-pro
+# MiMo-V2.6 系列（2026-09-22 发布）：mimo-v2.6-pro / mimo-v2.6-flash / mimo-v2.6-pro-ultraspeed
+# 识图用 flash 性价比最高（全模态、支持图片理解）；mimo-v2.5 / mimo-v2.5-pro 将于
+# 2026-10-21 下线，故默认改用 2.6。模型名不可用时会按 XIAOMI_MODEL_FALLBACKS 自动降级。
+DEFAULT_XIAOMI_MODEL = "mimo-v2.6-flash"
+XIAOMI_MODEL_FALLBACKS: tuple[str, ...] = (
+    "mimo-v2.6-flash",
+    "mimo-v2.6-pro",
+    "mimo-v2.5",
+)
 # 百度智能云图像识别（通用物体和场景识别 advanced_general）
 DEFAULT_BAIDU_TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
 DEFAULT_BAIDU_API_URL = "https://aip.baidubce.com/rest/2.0/image-classify/v2/advanced_general"
@@ -471,7 +480,11 @@ class ImageBridgeCore(_PluginCoreBase):
         raise RuntimeError("未配置任何可用的识别服务")
 
     async def _recognize_xiaomi(self, data: bytes, ext: str, mime: str) -> str:
-        """小米 MiMo Token Plan 识图模型（OpenAI 兼容，图片以 base64 data URI 传入）。"""
+        """小米 MiMo Token Plan 识图模型（OpenAI 兼容，图片以 base64 data URI 传入）。
+
+        模型名支持自动降级：配置的模型若因「已下线/不存在」报错，会依次尝试
+        XIAOMI_MODEL_FALLBACKS（V2.6 系列优先），避免官方迭代模型名后识图直接失效。
+        """
         api_key = str(self._cfg("xiaomi_api_key", "") or "").strip()
         base_url = str(
             self._cfg("xiaomi_base_url", DEFAULT_XIAOMI_BASE_URL) or DEFAULT_XIAOMI_BASE_URL
@@ -491,38 +504,73 @@ class ImageBridgeCore(_PluginCoreBase):
             "1) 图片中的文字内容（如有，请原样输出）；\n"
             "2) 图片的主要内容、场景或物体。"
         )
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-            "max_completion_tokens": 1024,
-        }
         headers = {
             "api-key": api_key,  # 官方文档 curl 示例使用的鉴权头
             "Content-Type": "application/json",
         }
         url = f"{base_url}/chat/completions"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(f"小米接口 HTTP {resp.status_code}: {resp.text[:200]}")
-        result = resp.json()
-        try:
-            content = (
-                ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+        models: list[str] = []
+        for cand in (model, *XIAOMI_MODEL_FALLBACKS):
+            cand = str(cand or "").strip()
+            if cand and cand not in models:
+                models.append(cand)
+
+        last_err = ""
+        for idx, cand in enumerate(models):
+            payload = {
+                "model": cand,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{b64}"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                "max_completion_tokens": 1024,
+            }
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code == 200:
+                result = resp.json()
+                try:
+                    content = (
+                        ((result.get("choices") or [{}])[0].get("message") or {}).get(
+                            "content"
+                        )
+                        or ""
+                    )
+                except Exception:
+                    raise RuntimeError(
+                        f"小米接口返回异常: {str(result)[:200]}"
+                    ) from None
+                if not content.strip():
+                    raise RuntimeError("小米接口未返回识别内容")
+                if idx > 0:
+                    logger.info(
+                        f"[image_bridge] 小米模型已自动降级为 `{cand}`（原 `{model}` 不可用）"
+                    )
+                return content.strip()
+
+            body = resp.text[:200]
+            last_err = f"小米接口 HTTP {resp.status_code}: {body}"
+            low = body.lower()
+            model_issue = resp.status_code in (400, 404) and any(
+                k in low
+                for k in ("model", "not found", "unsupported", "invalid", "不存在", "下线")
             )
-        except Exception:
-            raise RuntimeError(f"小米接口返回异常: {str(result)[:200]}") from None
-        if not content.strip():
-            raise RuntimeError("小米接口未返回识别内容")
-        return content.strip()
+            if model_issue and idx < len(models) - 1:
+                logger.warning(
+                    f"[image_bridge] 小米模型 `{cand}` 不可用，改用下一个候选: {last_err}"
+                )
+                continue
+            raise RuntimeError(last_err)
+        raise RuntimeError(last_err or "小米接口调用失败")
 
     async def _baidu_access_token(self) -> str:
         """获取（并缓存）百度 access_token，有效期 30 天，提前 10 分钟自动刷新。"""

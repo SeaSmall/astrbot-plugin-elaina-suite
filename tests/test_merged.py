@@ -280,9 +280,63 @@ async def main():
     assert g4._blocked_total == 1 and g4._retried_ok == 1
     print("[14] LlmGuardCore 重新注入提示词 OK（含端到端替换）")
 
+    # 15) 小米 MiMo 模型名自动降级（V2.6 默认 + 模型不可用时换候选）
+    import types as _types
+
+    script = []
+
+    class _Resp:
+        def __init__(self, status, text="", data=None):
+            self.status_code = status
+            self.text = text
+            self._d = data or {}
+
+        def json(self):
+            return self._d
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return script.pop(0)
+
+    orig_httpx = mod.httpx
+    mod.httpx = _types.SimpleNamespace(
+        Timeout=lambda *a, **k: None, AsyncClient=lambda *a, **k: _Client()
+    )
+    try:
+        assert mod.DEFAULT_XIAOMI_MODEL == "mimo-v2.6-flash", mod.DEFAULT_XIAOMI_MODEL
+        ib = pl.image_bridge
+        pl.config["xiaomi_api_key"] = "tp-test"
+        pl.config["xiaomi_model"] = "mimo-v2.6-flash"
+        # 15a) 第一个模型报「模型不可用」-> 自动换下一个候选并成功
+        script[:] = [
+            _Resp(400, '{"error":{"message":"model not found: mimo-v2.6-flash"}}'),
+            _Resp(200, "", {"choices": [{"message": {"content": "图中是一杯咖啡"}}]}),
+        ]
+        out = await ib._recognize_xiaomi(b"\x89PNG\r\n\x1a\n" + b"x" * 20, "png", "image/png")
+        assert out == "图中是一杯咖啡", out
+        # 15b) 非模型类错误（401）应立即抛出，不做无意义重试
+        script[:] = [_Resp(401, '{"error":"unauthorized"}')]
+        try:
+            await ib._recognize_xiaomi(b"\x89PNG\r\n\x1a\n" + b"x" * 20, "png", "image/png")
+            raise AssertionError("401 应抛异常")
+        except RuntimeError as e:
+            assert "401" in str(e), e
+    finally:
+        mod.httpx = orig_httpx
+    print("[15] MiMo 2.6 默认 + 模型名自动降级 OK")
+
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
-    print("[15] terminate() 完成，门禁已卸载")
+    print("[16] terminate() 完成，门禁已卸载")
 
 asyncio.run(main())
 print("ALL SMOKE TESTS PASSED")
