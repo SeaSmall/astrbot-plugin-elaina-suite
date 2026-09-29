@@ -361,24 +361,36 @@
   "guard_mode": {
     "type": "string",
     "description": "[LLM 拦截兜底] 命中拦截特征后的处理方式：replace / drop / log",
-    "hint": "replace：替换成重发结果或兜底文案（推荐）；drop：整条丢弃；log：只记日志不改动。",
+    "hint": "replace：把用户提示词重新注入 LLM 再生成一次（默认，用户仍能拿到真回复，全部尝试失败才用兜底文案）；drop：整条丢弃；log：只记日志不改动。",
     "default": "replace"
   },
   "guard_retry_provider_id": {
     "type": "string",
-    "description": "[LLM 拦截兜底] 被拦截时用于重新生成回复的备用 provider ID",
-    "hint": "留空则只发兜底文案。填了之后主模型被风控拦截时会用该 provider 重发一次。建议填非 Moonshot/Kimi 的 provider。",
+    "description": "[LLM 拦截兜底] 重新注入提示词时使用的 provider ID（留空 = 用当前会话的模型）",
+    "hint": "留空即用当前会话模型重发（开箱即用）；也可填 AstrBot「服务提供商」里的其它 provider ID（如 deepseek、glm-4），换一家模型以避开同一家风控。",
     "default": ""
   },
   "guard_retry_timeout": {
     "type": "int",
-    "description": "[LLM 拦截兜底] 备用 provider 重发超时（秒）",
+    "description": "[LLM 拦截兜底] 每次重新注入的超时（秒）",
     "default": 60
+  },
+  "guard_retry_attempts": {
+    "type": "int",
+    "description": "[LLM 拦截兜底] 把用户提示词重新注入 LLM 的尝试次数（1~3，默认 2）",
+    "hint": "第 1 次携带原始人设/系统提示词；第 2 次起只重发用户提示词（去掉人设与历史，通常能绕开由人设/历史触发的风控）。",
+    "default": 2
+  },
+  "guard_retry_keep_system_prompt": {
+    "type": "bool",
+    "description": "[LLM 拦截兜底] 首次重新注入是否携带人设/系统提示词",
+    "hint": "关闭则每次都只重发用户提示词（更不易被拦，但回复可能缺人设风格）。默认开启。",
+    "default": true
   },
   "guard_fallback_text": {
     "type": "string",
     "description": "[LLM 拦截兜底] 重发失败时发送的兜底文案",
-    "hint": "留空则静默丢弃。",
+    "hint": "重新注入全部失败时才发送；留空则静默丢弃。",
     "default": "（刚才那条没能生成出来，再发一次试试？）"
   },
   "guard_soft_scan": {

@@ -3400,11 +3400,22 @@ class LlmGuardCore(_PluginCoreBase):
 
     @property
     def retry_provider_id(self) -> str:
+        """重新注入用的 provider（留空 = 用当前会话模型）。"""
         return str(self._g("retry_provider_id", "") or "").strip()
 
     @property
     def retry_timeout(self) -> int:
         return _guard_as_int(self._g("retry_timeout", 60), 60)
+
+    @property
+    def retry_attempts(self) -> int:
+        """把用户提示词重新注入 LLM 的尝试次数（1~3）。"""
+        return max(1, min(3, _guard_as_int(self._g("retry_attempts", 2), 2)))
+
+    @property
+    def retry_keep_system_prompt(self) -> bool:
+        """首次重新注入是否携带人设/系统提示词。"""
+        return _guard_as_bool(self._g("retry_keep_system_prompt", True), True)
 
     @property
     def soft_scan(self) -> bool:
@@ -3560,17 +3571,13 @@ class LlmGuardCore(_PluginCoreBase):
             logger.info("[llm_guard] 已丢弃该条消息（mode=drop）")
             return
 
-        # mode == "replace"：优先换 provider 重新生成，失败再用静态兜底文案
-        replacement = ""
-        if self.retry_provider_id:
-            replacement = await self._retry_with_provider(event)
-            if replacement:
-                self._retried_ok += 1
-                record["retried"] = True
-                logger.info(
-                    f"[llm_guard] 已用备用 provider `{self.retry_provider_id}` 重新生成回复"
-                )
-        if not replacement:
+        # mode == "replace"：把用户提示词重新注入 LLM 再生成一次（默认用当前会话模型），
+        # 全部尝试仍被拦/失败时才退回静态兜底文案。
+        replacement = await self._re_inject_prompt(event)
+        if replacement:
+            self._retried_ok += 1
+            record["retried"] = True
+        else:
             replacement = self.fallback_text
         kept = [c for c in result.chain if not isinstance(c, Plain)]
         if replacement.strip():
@@ -3581,34 +3588,65 @@ class LlmGuardCore(_PluginCoreBase):
             event.clear_result()
         logger.info("[llm_guard] 已替换错误文案（mode=replace）")
 
-    async def _retry_with_provider(self, event: AstrMessageEvent) -> str:
-        """用备用 provider 重新生成一次回复；失败返回空串。"""
+    async def _re_inject_prompt(self, event: AstrMessageEvent) -> str:
+        """把用户提示词重新注入 LLM 再生成一次回复（不终止本轮对话）。
+
+        策略：
+        1. provider 取配置的备用 provider；未配置则用**当前会话的模型**（开箱即用）；
+        2. 第 1 次尝试携带原始人设/系统提示词；第 2 次起**只重发用户提示词**
+           （去掉人设与历史，通常能绕开由人设/历史触发的风控）；
+        3. 每次返回都二次校验，避免把错误文案又发出去；
+        4. 全部尝试失败返回空串，由调用方回退兜底文案。
+        """
         snapshot = self._last_request or {}
         user_message = str(snapshot.get("user_message") or "").strip()
         if not user_message:
             user_message = (event.message_str or "").strip()
         if not user_message:
-            logger.warning("[llm_guard] 无可用的问题文本，跳过重发")
+            logger.warning("[llm_guard] 无可用的问题文本，跳过重新注入")
             return ""
-        kwargs: dict = {
-            "chat_provider_id": self.retry_provider_id,
-            "prompt": user_message,
-        }
+        provider_id = self.retry_provider_id
+        if not provider_id:
+            try:
+                provider_id = await self.context.get_current_chat_provider_id(
+                    umo=event.unified_msg_origin
+                )
+            except Exception as e:
+                logger.warning(f"[llm_guard] 获取当前会话 provider 失败: {e}")
+        if not provider_id:
+            logger.warning("[llm_guard] 无法确定 provider，跳过重新注入")
+            return ""
         system_prompt = str(snapshot.get("system_prompt") or "").strip()
-        if system_prompt:
-            kwargs["system_prompt"] = system_prompt
-        try:
-            resp = await asyncio.wait_for(
-                self.context.llm_generate(**kwargs), timeout=self.retry_timeout
-            )
-        except Exception as e:
-            logger.warning(f"[llm_guard] 备用 provider 重发失败: {e}")
-            return ""
-        text = self._llm_text(resp)
-        if not text or self.match_reason(text):
-            logger.warning("[llm_guard] 备用 provider 同样被拦截或返回为空")
-            return ""
-        return text
+        attempts = self.retry_attempts
+        for idx in range(1, attempts + 1):
+            kwargs: dict = {
+                "chat_provider_id": provider_id,
+                "prompt": user_message,
+            }
+            if idx == 1 and self.retry_keep_system_prompt and system_prompt:
+                kwargs["system_prompt"] = system_prompt
+            try:
+                resp = await asyncio.wait_for(
+                    self.context.llm_generate(**kwargs), timeout=self.retry_timeout
+                )
+            except Exception as e:
+                logger.warning(f"[llm_guard] 第 {idx} 次重新注入失败: {e}")
+                continue
+            text = self._llm_text(resp)
+            if text and not self.match_reason(text):
+                logger.info(
+                    f"[llm_guard] 第 {idx} 次重新注入成功"
+                    f"（provider={provider_id}，"
+                    f"{'携带人设' if kwargs.get('system_prompt') else '仅用户提示词'}）"
+                )
+                return text
+            logger.warning(f"[llm_guard] 第 {idx} 次重新注入仍被拦截或返回为空")
+        return ""
+
+    # 兼容旧名称
+    async def _retry_with_provider(self, event: AstrMessageEvent) -> str:
+        """[兼容保留] 等价于 _re_inject_prompt。"""
+        return await self._re_inject_prompt(event)
 
     @staticmethod
     def _llm_text(resp: object) -> str:
@@ -3674,9 +3712,11 @@ class LlmGuardCore(_PluginCoreBase):
         lines = [
             "🛡 LLM 安全拦截兜底",
             f"启用：{'是' if self.enabled else '否'}｜模式：{self.mode}",
-            f"备用 provider：{self.retry_provider_id or '（未配置）'}",
+            f"重新注入 provider：{self.retry_provider_id or '（当前会话模型）'}",
+            f"重新注入尝试：{self.retry_attempts} 次"
+            f"（首次{'携带' if self.retry_keep_system_prompt else '不携带'}人设）",
             f"二级特征扫描：{'开' if self.soft_scan else '关'}",
-            f"累计拦截：{self._blocked_total}｜重发成功：{self._retried_ok}",
+            f"累计拦截：{self._blocked_total}｜重新注入成功：{self._retried_ok}",
         ]
         if self._recent:
             lines.append("")

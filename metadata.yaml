@@ -2,7 +2,7 @@ name: astrbot_plugin_elaina_suite
 display_name: Elaina 工具箱（六合一）
 desc: 六合一插件：图片问答桥接（小米→百度→OCR 三级识别）+ 每日简报（多城市天气/昨日新闻/科技医药政策前沿/GitHub 日升榜）+ 主动消息门禁与每日人格消息 + Elaina 表情包（本地库/在线抓图）+ LLM 拦截兜底 + 系统健康报告
 short_desc: 图片问答 · 每日简报 · 消息门禁 · Elaina 表情包 · LLM 拦截兜底 · 系统健康
-version: 1.0.0
+version: 1.0.1
 author: SeaSmall
 repo: https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 license: MIT

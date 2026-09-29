@@ -27,7 +27,7 @@
 - `auto`（默认）：本地有表情库就用 library，否则用 keyword。
 本地表情包目录**自动检测三顺位**：① 配置 `meme_dir` → ② 插件目录下 `meme/` → ③ AstrBot `plugins/*/meme`（可**直接复用**你已安装的 Elaina 表情包素材，无需拷贝）。
 
-**5. LLM 拦截兜底**：发送前检查即将发出的文本，命中拦截特征时按 `guard_mode` 替换 / 丢弃 / 仅记录；可选 `guard_retry_provider_id` 用备用模型重新生成；`guard_dump_on_reject` 可把触发风控的完整 prompt 转存，便于定位根因。
+**5. LLM 拦截兜底**：发送前检查即将发出的文本，命中拦截特征（如 `content_filter` / `high risk`）时按 `guard_mode` 处理——默认 **替换**：把**用户提示词重新注入 LLM 再生成一次**（provider 默认用当前会话模型，无需配置；第 1 次带人设、第 2 次起只重发用户提示词，全部失败才用 `guard_fallback_text`）；也可选 `drop`（丢弃）/ `log`（仅记录）。`guard_dump_on_reject` 可把触发风控的完整 prompt 转存，便于定位根因。
 
 **6. 系统健康报告**：定时渲染成图片推送（不可用时回退文本）。psutil 为**可选依赖**：未安装时该功能自动禁用，不影响其它五个功能。
 
@@ -73,7 +73,7 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_target_sessions` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_medical` / `feeds_policy` / `llm_prompt`
 - **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
 - **Elaina 表情包**：`meme_enabled` / `meme_source` / `meme_dir` / `trigger_prob` / `meme_prompt` / `api_url_tangdouz` / `api_url_apihz_sogou` / `api_url_apihz_baidu` / `apihz_id` / `apihz_key` / `meme_count` / `send_timeout` / `max_meme_mb`
-- **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
+- **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
 
 ## ❓ 常见问题

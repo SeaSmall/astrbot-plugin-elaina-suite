@@ -203,9 +203,86 @@ async def main():
         assert pl.system_health.enabled is False
         print("[13] 未安装 psutil -> 健康核心自动禁用 OK")
 
+    # 14) LLM 拦截兜底：把用户提示词重新注入 LLM 再生成
+    REJECT = "The request was rejected because it was considered high risk"
+
+    class GuardCtx:
+        def __init__(self, script):
+            self.script = list(script)
+            self.calls = []
+
+        async def get_current_chat_provider_id(self, umo=None):
+            return "cur-provider"
+
+        async def llm_generate(self, **kw):
+            self.calls.append(kw)
+            item = self.script.pop(0) if self.script else ""
+
+            class R:
+                completion_text = item
+
+            return R()
+
+    # 14a) 首次注入：用当前会话模型 + 携带人设
+    gctx = GuardCtx(["春风又绿江南岸"])
+    gpl = mod.ElainaSuitePlugin(context=gctx, config={"guard_enabled": True})
+    g = gpl.llm_guard
+    g._last_request = {"user_message": "帮我写首诗", "system_prompt": "你是艾拉娜", "prompt": "x"}
+    out = await g._re_inject_prompt(ev)
+    assert out == "春风又绿江南岸", out
+    assert gctx.calls[0]["chat_provider_id"] == "cur-provider"
+    assert gctx.calls[0]["prompt"] == "帮我写首诗"
+    assert gctx.calls[0].get("system_prompt") == "你是艾拉娜"
+
+    # 14b) 第一次被拦 -> 第二次仅用户提示词
+    gctx2 = GuardCtx([REJECT, "好的，这是为你写的诗"])
+    gpl2 = mod.ElainaSuitePlugin(context=gctx2, config={"guard_enabled": True})
+    g2 = gpl2.llm_guard
+    g2._last_request = {"user_message": "帮我写首诗", "system_prompt": "你是艾拉娜", "prompt": "x"}
+    out2 = await g2._re_inject_prompt(ev)
+    assert out2 == "好的，这是为你写的诗", out2
+    assert len(gctx2.calls) == 2
+    assert "system_prompt" in gctx2.calls[0] and "system_prompt" not in gctx2.calls[1]
+
+    # 14c) 全部被拦 -> 空串（交给兜底文案）
+    gctx3 = GuardCtx([REJECT, REJECT])
+    gpl3 = mod.ElainaSuitePlugin(context=gctx3, config={"guard_enabled": True})
+    g3 = gpl3.llm_guard
+    g3._last_request = {"user_message": "帮我写首诗", "prompt": "x"}
+    assert await g3._re_inject_prompt(ev) == ""
+
+    # 14d) 端到端：on_decorating_result 把拦截文案换成重注入结果
+    class GResult:
+        def __init__(self, text):
+            self.chain = [mod.Plain(text)]
+
+    class GEvent:
+        unified_msg_origin = "aiocqhttp:Friend:1"
+        message_str = "帮我写首诗"
+
+        def __init__(self, text):
+            self._r = GResult(text)
+
+        def get_result(self):
+            return self._r
+
+        def clear_result(self):
+            self._r = None
+
+    gctx4 = GuardCtx(["这是重新生成的正常回复"])
+    gpl4 = mod.ElainaSuitePlugin(context=gctx4, config={"guard_enabled": True, "guard_retry_attempts": 1})
+    g4 = gpl4.llm_guard
+    g4._last_request = {"user_message": "帮我写首诗", "prompt": "x"}
+    gev = GEvent(REJECT)
+    await g4.on_decorating_result(gev)
+    final = "".join(getattr(c, "text", "") for c in gev.get_result().chain)
+    assert final == "这是重新生成的正常回复", final
+    assert g4._blocked_total == 1 and g4._retried_ok == 1
+    print("[14] LlmGuardCore 重新注入提示词 OK（含端到端替换）")
+
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
-    print("[14] terminate() 完成，门禁已卸载")
+    print("[15] terminate() 完成，门禁已卸载")
 
 asyncio.run(main())
 print("ALL SMOKE TESTS PASSED")
