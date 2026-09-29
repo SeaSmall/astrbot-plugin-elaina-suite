@@ -1,0 +1,463 @@
+{
+  "xiaomi_api_key": {
+    "type": "string",
+    "description": "【图片问答桥接】小米 MiMo Token Plan API Key（优先级最高，填了才启用）",
+    "hint": "获取 Key：[MiMo 开放平台控制台 → Token Plan](https://platform.xiaomimimo.com/#/console/plan-manage)（订阅套餐后获取专属 Base URL 与 Key，格式 tp-xxxxx）",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "xiaomi_base_url": {
+    "type": "string",
+    "description": "【图片问答桥接】小米 Token Plan 接口地址（区域）",
+    "hint": "默认中国区。其他区域：`https://token-plan-ams.xiaomimimo.com/v1`（美西）、`https://token-plan-sgp.xiaomimimo.com/v1`（新加坡）",
+    "default": "https://token-plan-cn.xiaomimimo.com/v1"
+  },
+  "xiaomi_model": {
+    "type": "string",
+    "description": "【图片问答桥接】小米识图模型",
+    "hint": "推荐 `mimo-v2.5`（支持图片理解）；也可填 `mimo-v2.5-pro`",
+    "default": "mimo-v2.5"
+  },
+  "baidu_api_key": {
+    "type": "string",
+    "description": "【图片问答桥接】百度智能云图像识别 API Key（次级优先，与 Secret Key 都填了才启用）",
+    "hint": "获取 Key：[百度智能云控制台-图像识别](https://console.bce.baidu.com/ai/?fromai=1#/ai/imagerecognition/app/list) 创建应用；接口文档见[图像识别](https://cloud.baidu.com/doc/IMAGERECOGNITION/s/7k3bcxdn8)",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "baidu_secret_key": {
+    "type": "string",
+    "description": "【图片问答桥接】百度智能云图像识别 Secret Key",
+    "hint": "与上方的 API Key 在同一个应用中获取",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "ocr_api_url": {
+    "type": "string",
+    "description": "【图片问答桥接】OCR 接口地址（兜底服务）",
+    "hint": "默认使用 OCR.space 免费接口。",
+    "default": "https://api.ocr.space/parse/image"
+  },
+  "ocr_api_key": {
+    "type": "string",
+    "description": "【图片问答桥接】OCR.space 免费 API Key（兜底服务）",
+    "hint": "默认 \"helloworld\" 为 OCR.space 公开测试 key（免费但有限流）。免费注册获取专属 key：[OCR.space](https://ocr.space/ocrapi)",
+    "obvious_hint": true,
+    "default": "helloworld"
+  },
+  "ocr_language": {
+    "type": "string",
+    "description": "【图片问答桥接】OCR 识别语言",
+    "hint": "OCR.space 语言代码：chs=简体中文，eng=英文，chinese_tra=繁体中文等。",
+    "default": "chs"
+  },
+  "ocr_timeout": {
+    "type": "int",
+    "description": "【图片问答桥接】识别请求超时时间（秒）",
+    "default": 60
+  },
+  "pending_ttl": {
+    "type": "int",
+    "description": "【图片问答桥接】图片识别内容有效期（秒），超时后需重新发送图片",
+    "default": 1800
+  },
+  "recognition_wait_timeout": {
+    "type": "int",
+    "description": "【图片问答桥接】用户提问时等待图片识别完成的最长时间（秒），超时按已识别到的内容注入",
+    "hint": "防止用户发图后立刻提问时识别还没完成导致漏注入；识别一般 1~10 秒内完成，超时上限 30 秒足够",
+    "default": 30
+  },
+  "emoji_wait_pending": {
+    "type": "bool",
+    "description": "【图片问答桥接】自定义表情包（单 [表情]，无名字）发送后是否进入「等待提问」模式。关闭时表情包不拦截、AI 直接回复；带名字表情（[表情:赞]）始终直接回复，不受此开关影响",
+    "default": true
+  },
+  "prompt_template": {
+    "type": "text",
+    "description": "【图片问答桥接】注入给 AI 的提示词模板，{image_content} 会被替换为识别出的内容",
+    "default": "<用户上传的图片识别内容>\n{image_content}\n</用户上传的图片识别内容>\n以上是用户刚上传图片的识别结果（文字 OCR / 图像识别描述），请结合该图片内容回答用户的问题。"
+  },
+  "send_cron": {
+    "type": "string",
+    "default": "0 8 * * *",
+    "description": "【每日简报】定时发送时间（标准 5 段 cron 表达式，默认每天 08:00。示例：30 7 * * 1-5 表示工作日 07:30）"
+  },
+  "digest_timezone": {
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "description": "【每日简报】定时任务时区（IANA 时区名，如 Asia/Shanghai / UTC）。cron 表达式按此时区计算（原 daily_digest 的 timezone 配置项）"
+  },
+  "send_deadline": {
+    "type": "string",
+    "default": "13:00",
+    "description": "【每日简报】补发截止时间（HH:MM）：到发送时间后若因休眠/网络未发出，会每 5 分钟兜底补发一次，直到此截止时间（避免深夜误发）"
+  },
+  "weather_city": {
+    "type": "string",
+    "default": "上海",
+    "description": "【每日简报】天气城市，支持多城市：用换行 / 逗号 / 顿号分隔（如：上海、北京、广州），逐城市输出天气"
+  },
+  "weather_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用天气板块"
+  },
+  "weather_cache_minutes": {
+    "type": "int",
+    "default": 30,
+    "description": "【每日简报】天气结果缓存时间（分钟）：缓存期内直接复用，避免反复请求 Open-Meteo"
+  },
+  "weather_interval_seconds": {
+    "type": "int",
+    "default": 3,
+    "description": "【每日简报】相邻两次 Open-Meteo 请求的最小间隔（秒）：防止触发限流（并发请求会自动排队等待）"
+  },
+  "news_cn_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用「昨日国内新闻」板块"
+  },
+  "news_intl_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用「昨日国际新闻」板块"
+  },
+  "tech_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用「科技前沿」板块"
+  },
+  "medical_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用「医药前沿」板块"
+  },
+  "policy_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用「政策前沿」板块"
+  },
+  "github_trending_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否启用「GitHub 日升榜」板块（近 N 天 star 增长最快的仓库 Top10，多源免 Key 降级抓取）"
+  },
+  "github_trending_days": {
+    "type": "int",
+    "default": 7,
+    "description": "【每日简报】GitHub 日升榜统计周期（天）：按近 N 天新建仓库筛选 / 标注涨幅（OSS Insight 与 GitHub Search 使用）"
+  },
+  "github_trending_count": {
+    "type": "int",
+    "default": 10,
+    "description": "【每日简报】GitHub 日升榜展示的仓库数量（Top N）"
+  },
+  "github_trending_min_stars": {
+    "type": "int",
+    "default": 0,
+    "description": "【每日简报】GitHub 日升榜最低 star 过滤（低于该 star 数的仓库不展示，0 为不过滤）"
+  },
+  "max_items_per_section": {
+    "type": "int",
+    "default": 5,
+    "description": "【每日简报】每个新闻板块最多保留的条目数"
+  },
+  "ai_summary_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】是否用 AI 总结生成简报（关闭后使用模板格式直接推送，AI 不可用时也会自动降级为模板）"
+  },
+  "digest_send_mode": {
+    "type": "string",
+    "default": "auto",
+    "description": "【每日简报】简报发送方式：text=纯文本分条发送；image=渲染为图片发送；file=保存为 .md 文件发送（需平台支持本地文件）；auto=短文本直接发，超过阈值自动转图片（失败回退 md 文件/文本）"
+  },
+  "digest_long_threshold": {
+    "type": "int",
+    "default": 2000,
+    "description": "【每日简报】auto 模式下触发「转图片/文件」的简报长度阈值（字符数）"
+  },
+  "digest_target_sessions": {
+    "type": "text",
+    "default": "",
+    "description": "【每日简报】指定推送会话（unified_msg_origin，每行一个，如 aiocqhttp:Group:123456789）。留空则自动推送给「所有用户」（数据库枚举 + 订阅用户）（原 daily_digest 的 target_sessions 配置项）"
+  },
+  "feeds_cn": {
+    "type": "text",
+    "default": "cctv:china\ntencent:hot\nbaidu:hot",
+    "description": "【每日简报】国内新闻源（每行一个：RSS URL，或 cctv:频道 / tencent:hot / baidu:hot）"
+  },
+  "feeds_intl": {
+    "type": "text",
+    "default": "cctv:world\nhttps://www.chinadaily.com.cn/rss/world_rss.xml",
+    "description": "【每日简报】国际新闻源（每行一个：RSS URL，或 cctv:频道）"
+  },
+  "feeds_tech": {
+    "type": "text",
+    "default": "https://www.ithome.com/rss/\nhttps://sspai.com/feed\nhttps://www.ifanr.com/feed\nhttps://www.geekpark.net/rss",
+    "description": "【每日简报】科技前沿源（每行一个 RSS URL）"
+  },
+  "feeds_medical": {
+    "type": "text",
+    "default": "https://www.who.int/rss-feeds/news-english.xml\nhttps://www.nature.com/nm.rss",
+    "description": "【每日简报】医药前沿源（每行一个 RSS URL）"
+  },
+  "feeds_policy": {
+    "type": "text",
+    "default": "cctv:news\nbaidu:hot",
+    "description": "【每日简报】政策前沿源（每行一个：RSS URL，或 cctv:频道 / baidu:hot）"
+  },
+  "llm_prompt": {
+    "type": "text",
+    "default": "你是一名严谨、简洁的中文每日简报编辑。今天是 {date}。请根据下面的原始资讯生成【每日简报】，要求：\n1. 按板块输出：🌤️ 天气、🇨🇳 昨日国内、🌍 昨日国际、💻 科技前沿、💊 医药前沿、📜 政策前沿、🚀 GitHub 日升榜（有数据的板块必须全部输出，不要遗漏任何板块）\n2. 每个板块先用 1-2 句话概括，再列 3-5 条要点（标题 + 一句话说明），重要条目附原文链接\n3. 🚀 GitHub 日升榜的每个仓库要结合给出的描述，用一句话说明它「是什么、有什么功能」（如：XX —— 一个用于……的开源项目）\n4. 客观简洁、不夸张、不编造；总长度控制在 1800 字内\n原始资讯：\n{data}",
+    "description": "【每日简报】AI 总结提示词（{date} 为日期，{data} 为抓取到的原始资讯；旧版「1200 字内」限制会自动升级为 1800 字并强制输出所有板块）"
+  },
+  "pg_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【主动门禁/人格消息】总开关：关闭后门禁拦截与每日消息全部停用（原 proactive_guard 的 enabled 配置项）"
+  },
+  "block_proactive": {
+    "type": "bool",
+    "default": true,
+    "description": "【主动门禁/人格消息】门禁开关：拦截本插件之外的 AI 主动发言（用户未发消息时的所有 AI 生成与发送）"
+  },
+  "strict_mode": {
+    "type": "bool",
+    "default": false,
+    "description": "【主动门禁/人格消息】严格模式：开启后连「用户最近发过消息的会话」也不放行，只允许本插件发送（推荐给只需要定时消息的用户）"
+  },
+  "active_window_minutes": {
+    "type": "int",
+    "default": 30,
+    "description": "【主动门禁/人格消息】活跃窗口（分钟）：用户在此窗口内发过消息的会话，允许 AI 正常回复/发送（视为用户主动发起对话）"
+  },
+  "allow_senders": {
+    "type": "text",
+    "default": "daily_digest",
+    "description": "【主动门禁/人格消息】主动发送白名单：允许主动发消息的外部插件模块名关键词，每行一个（默认放行 daily_digest——合并插件内日报通过内部放行计数直接放行，此项用于兼容自定义/外部插件白名单）"
+  },
+  "pause_active_agent_jobs": {
+    "type": "bool",
+    "default": true,
+    "description": "【主动门禁/人格消息】插件启用时自动暂停 AstrBot 内置「主动型 Agent」定时任务（可逆，不会删除任务）"
+  },
+  "gen_time": {
+    "type": "string",
+    "default": "0 6 * * *",
+    "description": "【主动门禁/人格消息】每日计划生成时间（cron，默认每天 06:00）：确保「明天」的计划已预生成；计划缺失时任意时刻都会自动补种（20 分钟节流）"
+  },
+  "pg_timezone": {
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "description": "【主动门禁/人格消息】定时任务时区（IANA 时区名，如 Asia/Shanghai / UTC）。cron 表达式按此时区计算（原 proactive_guard 的 timezone 配置项）"
+  },
+  "message_prompt": {
+    "type": "text",
+    "default": "你是{persona}\n今天是{date}。请在下面给出的 {count} 个时间点，分别给用户写一条简短消息（20~60字），要求：\n1. 每条消息要贴合对应时间点的场景（早晨问候、上午加油、中午提醒休息吃饭、下午闲聊、傍晚关心、晚上问候、睡前道晚安等）\n2. 每条内容必须不同，风格自然口语化，像真人朋友随手发的一条\n3. 只输出一个 JSON 数组，格式：[{\"time\": \"07:35\", \"text\": \"消息内容\"}, ...]\n4. 不要输出 JSON 以外的任何文字\n时间点：{time_list}",
+    "description": "【主动门禁/人格消息】写消息的提示词模板（{persona} 自动替换为 AstrBot 当前人格设定，{date} {time_list} {count} 自动替换）"
+  },
+  "msg_count_min": {
+    "type": "int",
+    "default": 5,
+    "description": "【主动门禁/人格消息】每日最少消息条数"
+  },
+  "msg_count_max": {
+    "type": "int",
+    "default": 10,
+    "description": "【主动门禁/人格消息】每日最多消息条数"
+  },
+  "window_start": {
+    "type": "string",
+    "default": "07:00",
+    "description": "【主动门禁/人格消息】消息时间窗口起点（HH:MM）"
+  },
+  "window_end": {
+    "type": "string",
+    "default": "23:00",
+    "description": "【主动门禁/人格消息】消息时间窗口终点（HH:MM）"
+  },
+  "missed_grace_minutes": {
+    "type": "int",
+    "default": 30,
+    "description": "【主动门禁/人格消息】过期补偿窗口（分钟）：到点未发出（如设备休眠）会在此窗口内补发；超过则丢弃该条"
+  },
+  "record_to_history": {
+    "type": "bool",
+    "default": true,
+    "description": "【主动门禁/人格消息】把主动发送的人格消息写入该会话的 LLM 对话历史（assistant 角色），避免模型后续回复时不知道机器人主动说过什么（记忆断层）。关闭则不写入"
+  },
+  "pg_target_sessions": {
+    "type": "text",
+    "default": "",
+    "description": "【主动门禁/人格消息】发送目标会话（unified_msg_origin，每行一个，如 aiocqhttp:Friend:123456）。留空则自动选择（见 only_private）（原 proactive_guard 的 target_sessions 配置项）"
+  },
+  "only_private": {
+    "type": "bool",
+    "default": true,
+    "description": "【主动门禁/人格消息】未指定 pg_target_sessions 时：仅发送给私聊会话（好友/私聊），不发送到群聊"
+  },
+  "meme_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【表情包回复】总开关（原 meme_responder 的 enabled 配置项）"
+  },
+  "trigger_prob": {
+    "type": "float",
+    "default": 0.5,
+    "description": "【表情包回复】触发概率（0~1）：用户发消息后有多大概率让 AI 附带表情包回复，默认 0.5"
+  },
+  "meme_prompt": {
+    "type": "text",
+    "description": "【表情包回复】注入给 AI 的表情关键词提示词模板（要求 AI 在回复末尾输出 {{MEME_KEYWORD}}关键词{{/MEME_KEYWORD}}）",
+    "default": "\n\n【附加指令（不要告诉用户）】\n在正常回答用户的同时，请根据当前对话的情绪/语境，在心里想一个最适合此时发送的表情包搜索关键词（2~6 个字，如：无语、开心、干得漂亮、加油、笑死、尴尬）。\n请在你的回复末尾另起一行，单独输出一行，格式为：\n{{MEME_KEYWORD}}关键词{{/MEME_KEYWORD}}\n不要输出其他多余内容在这一行。若你判断完全不需要表情包，输出 {{MEME_KEYWORD}}无{{/MEME_KEYWORD}}。"
+  },
+  "api_url_tangdouz": {
+    "type": "string",
+    "description": "【表情包回复】表情包搜索主接口（tangdouz，免费免 Key）：?return=json&nr={关键词}",
+    "default": "https://api.tangdouz.com/a/biaoq.php"
+  },
+  "api_url_apihz_sogou": {
+    "type": "string",
+    "description": "【表情包回复】备用接口：apihz 搜狗版（需 id/key）",
+    "default": "https://cn.apihz.cn/api/img/apihzbqbsougou.php"
+  },
+  "api_url_apihz_baidu": {
+    "type": "string",
+    "description": "【表情包回复】备用接口：apihz 百度版（需 id/key）",
+    "default": "https://cn.apihz.cn/api/img/apihzbqbbaidu.php"
+  },
+  "apihz_id": {
+    "type": "string",
+    "description": "【表情包回复】apihz 接口 ID（备用源用，可留空；留空则跳过 apihz 源）",
+    "default": ""
+  },
+  "apihz_key": {
+    "type": "string",
+    "description": "【表情包回复】apihz 接口 KEY（备用源用，可留空）",
+    "default": ""
+  },
+  "meme_count": {
+    "type": "int",
+    "description": "【表情包回复】每次搜索结果数量（apihz 源用），随机取一张",
+    "default": 10
+  },
+  "send_timeout": {
+    "type": "int",
+    "description": "表情包发送超时（秒）：QQ 官方等平台媒体上传可能重试较久，超时后自动尝试下一张/跳过（默认 30 秒）",
+    "default": 30
+  },
+  "max_meme_mb": {
+    "type": "int",
+    "description": "表情包文件大小上限（MB），超过则跳过（QQ 官方媒体上传有大小限制，默认 8）",
+    "default": 8
+  },
+  "guard_enabled": {
+    "type": "bool",
+    "description": "[LLM 拦截兜底] 启用兜底拦截",
+    "hint": "关闭后本功能完全不做任何处理。",
+    "default": true
+  },
+  "guard_mode": {
+    "type": "string",
+    "description": "[LLM 拦截兜底] 命中拦截特征后的处理方式：replace / drop / log",
+    "hint": "replace：替换成重发结果或兜底文案（推荐）；drop：整条丢弃；log：只记日志不改动。",
+    "default": "replace"
+  },
+  "guard_retry_provider_id": {
+    "type": "string",
+    "description": "[LLM 拦截兜底] 被拦截时用于重新生成回复的备用 provider ID",
+    "hint": "留空则只发兜底文案。填了之后主模型被风控拦截时会用该 provider 重发一次。建议填非 Moonshot/Kimi 的 provider。",
+    "default": ""
+  },
+  "guard_retry_timeout": {
+    "type": "int",
+    "description": "[LLM 拦截兜底] 备用 provider 重发超时（秒）",
+    "default": 60
+  },
+  "guard_fallback_text": {
+    "type": "string",
+    "description": "[LLM 拦截兜底] 重发失败时发送的兜底文案",
+    "hint": "留空则静默丢弃。",
+    "default": "（刚才那条没能生成出来，再发一次试试？）"
+  },
+  "guard_soft_scan": {
+    "type": "bool",
+    "description": "[LLM 拦截兜底] 同时扫描「通用内容安全措辞」二级特征",
+    "hint": "会额外识别 high risk / 内容安全 / 被拒绝 等泛化措辞，仅在短文本时判定。默认关闭以免误伤正常聊天。",
+    "default": false
+  },
+  "guard_soft_max_len": {
+    "type": "int",
+    "description": "[LLM 拦截兜底] 二级特征扫描的最大文本长度",
+    "default": 300
+  },
+  "guard_extra_markers": {
+    "type": "string",
+    "description": "[LLM 拦截兜底] 自定义拦截特征（逗号或换行分隔）",
+    "hint": "填了按强特征处理（大小写不敏感、不限长度）。服务商报错措辞不在内置表时填这里。",
+    "default": ""
+  },
+  "guard_patch_custom_error_reply": {
+    "type": "bool",
+    "description": "[LLM 拦截兜底] 把兜底文案挂到事件的「人设自定义错误消息」上（加固）",
+    "default": true
+  },
+  "guard_dump_on_reject": {
+    "type": "bool",
+    "description": "[LLM 拦截兜底] 被拦截时自动转存当次 LLM 请求（用于定位风控触发源）",
+    "default": false
+  },
+  "guard_dump_dir": {
+    "type": "string",
+    "description": "[LLM 拦截兜底] 转存目录",
+    "hint": "留空则用工作目录下 llm_guard_dumps/。",
+    "default": ""
+  },
+  "guard_log_prompt_preview": {
+    "type": "int",
+    "description": "[LLM 拦截兜底] 被拦截时在日志打印 prompt 前 N 个字符（0 不打印）",
+    "default": 0
+  },
+  "health_enabled": {
+    "type": "bool",
+    "description": "[系统健康报告] 总开关（需已安装 psutil）",
+    "default": true
+  },
+  "health_cron": {
+    "type": "string",
+    "description": "[系统健康报告] 定时发送时间（cron，默认每天 06:00）",
+    "default": "0 6 * * *"
+  },
+  "health_timezone": {
+    "type": "string",
+    "description": "[系统健康报告] 时区（IANA 名）",
+    "default": "Asia/Shanghai"
+  },
+  "health_target_sessions": {
+    "type": "text",
+    "description": "[系统健康报告] 推送目标会话（每行一个 unified_msg_origin），留空=所有用户",
+    "default": ""
+  },
+  "health_show_disk": {
+    "type": "bool",
+    "description": "[系统健康报告] 是否显示磁盘信息",
+    "default": true
+  },
+  "health_show_network": {
+    "type": "bool",
+    "description": "[系统健康报告] 是否显示网络接口信息",
+    "default": false
+  },
+  "meme_source": {
+    "type": "string",
+    "description": "[Elaina 表情包] 来源模式：library（本地表情库 AI 选图）/ keyword（关键词在线抓图）/ auto（默认，有本地库则用 library）",
+    "default": "auto"
+  },
+  "meme_dir": {
+    "type": "string",
+    "description": "[Elaina 表情包] 本地表情包目录",
+    "hint": "留空则自动检测：插件目录/meme → AstrBot plugins 下任意 */meme（可复用已安装的 Elaina 表情包素材）。",
+    "default": ""
+  }
+}

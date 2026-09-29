@@ -1,0 +1,16 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 虚拟环境
+.venv/
+venv/
+
+# 日志
+*.log
+
+# IDE / 系统
+.DS_Store
+.idea/
+.vscode/
