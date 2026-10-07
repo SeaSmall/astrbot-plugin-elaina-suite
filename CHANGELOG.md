@@ -75,3 +75,46 @@
 - **⚠️ 合规提醒**：小米官方文档写明 Token Plan 额度**仅限编程工具使用**，禁止用于自动化脚本 /
   自定义应用后端；在机器人里使用 Token Plan Key 属受限场景，建议改用标准按量计费 API 的 Key
   （README 已补充说明）。
+
+## v1.0.3（2026-10-05）
+
+### 🗑 移除：联网表情包搜索发送
+
+- **背景**：在线表情包 API（`api.tangdouz.com` 关键词搜图 + `cn.apihz.cn` 的百度/搜狗表情包接口）
+  搜出来的图经常跟对话不搭、甚至搜不到，使用体验是「那个不准」，按要求整条链路删除。
+- **移除的代码**：`ElainaMemeCore` 里的 `_fetch_meme_images` / `_fetch_from_source` / `_pick_meme_url` /
+  `_download_meme` / `_http_get_json` / `_http_get_bytes`，以及
+  `on_message`（用户消息阶段掷骰）、`on_llm_request`（注入关键词提示词）、
+  `_strip_meme_mark` / `_parse_keyword` / `_set_llm_text`；常量 `MEME_PROMPT_TEMPLATE` /
+  `DEFAULT_TRIGGER_PROB` / `DEFAULT_MEME_KEYWORDS` / `DEFAULT_API_URL_TANGDOUZ` /
+  `DEFAULT_API_URL_APIHZ_SOGOU` / `DEFAULT_API_URL_APIHZ_BAIDU`。
+- **删除的配置项（9 个）**：`meme_source` / `trigger_prob` / `meme_prompt` / `api_url_tangdouz` /
+  `api_url_apihz_sogou` / `api_url_apihz_baidu` / `apihz_id` / `apihz_key` / `meme_count`
+  （配置面板 90 → 82 项）。
+  > `trigger_prob` 若你还留着旧值，插件会把它当作 `meme_probability` 的**兼容回退**读取，不会静默失效。
+- **钩子减少**：`event_message_type(ALL)` × 3 → × 2、`on_llm_request` × 3 → × 2；
+  表情包仍走 `on_llm_response(priority=99999)`。
+
+### ✨ 对齐原版：Elaina 表情包按 `astrbot_plugin_Elaina_meme_Bridge` 行为重做
+
+- **触发时机**：从「用户消息阶段掷骰」改为「**AI 回复之后**掷骰」（原版行为），
+  且判定上下文取 **AI 自己的回复文本**（为空才回退用户消息），选出的表情包因此更贴当前回复。
+- **AI 选图**：把**对话内容 + 完整的表情包文件名列表**交给 AI，要求只回复文件名；
+  概率键名改回原版的 **`meme_probability`**（默认 0.5），并做 0~1 钳制。
+- **文件名对齐增强**：原版只认「完全相等」，AI 多回一个反引号/书名号、或带一句「我选 `无语.png`」，
+  就会挑不中而随机兜底（表现为「发得不准」）。现在先剥掉引号/书名号再全等匹配，
+  再退化为「回答里包含唯一文件名」，命中多个时取最长的那个，仍不中才随机兜底。
+  日志会打印 `AI 选择 \`xxx\`` 或 `AI 选择 \`xxx\` 不在库中，改用随机一张`。
+- **自带素材**：插件内置原版那 **50 个表情包**（`meme/` 目录，约 80 MB），装完即用，无需另装素材插件。
+- **素材目录三顺位保留**：① 配置 `meme_dir` → ② 插件目录 `meme/` → ③ AstrBot `plugins/*/meme`，
+  想换素材或复用已有素材都不用拷贝。
+- **保留的安全网**：图片魔数/大小校验（`_is_valid_image`，默认 8 MB 上限）与 `send_timeout` 发送超时。
+  （不再需要「最多换 3 张重试」——只发本地文件，不存在远端下载失败。）
+
+### 🔧 其它
+
+- `tests/test_merged.py`：第 12 组测试改为覆盖新行为（目录检测 / 文件名对齐 / 概率键名与钳制 /
+  `on_llm_response` 端到端发送与总开关关闭），并去掉已删除的 `on_message` 调用。
+- `.gitattributes`：新增 `meme/*.gif|jpg|jpeg|png|webp binary`，避免素材被当成文本做换行符转换。
+- README / metadata.yaml 同步更新（配置项清单、钩子清单、FAQ、素材版权声明：
+  50 个表情包来自 B 站「白之魔女-霜娜」，仅供个人学习、禁止商用）。

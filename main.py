@@ -8,8 +8,9 @@ astrbot_plugin_elaina_suite —— Elaina 工具箱（六合一合并插件）
    GitHub 日升榜，AI 总结后定时推送（含补发兜底与拦截降级）。
 3. 主动消息门禁 + 每日人格消息（ProactiveGuardCore）：拦截非本插件的 AI 主动发言；
    每天后台预生成「明天」的 5-10 条随机时间点人格消息，到点自动发送。
-4. Elaina 表情包（ElainaMemeCore）：本地表情库（AI 选图）或免费 API 关键词抓图，
-   按概率随回复发送；自动复用已安装的 Elaina 表情包素材目录。
+4. Elaina 表情包（ElainaMemeCore）：本地表情库 + AI 选图 —— LLM 回复后按概率让 AI
+   根据对话内容挑一张最合适的表情包发送（对齐原版 astrbot_plugin_Elaina_meme_Bridge，
+   插件自带原版 50 个素材，也可指向自己的表情包目录）。
 5. LLM 拦截兜底（LlmGuardCore）：拦截被泄漏到用户面前的 LLM 错误文案
    （content_filter / high risk 等），可换备用 provider 重发，并支持转存请求定位根因。
 6. 系统健康报告（SystemHealthCore）：CPU/内存/磁盘/运行时长/进程 → 图片定时推送
@@ -22,11 +23,11 @@ astrbot_plugin_elaina_suite —— Elaina 工具箱（六合一合并插件）
 - 配置键冲突处理（原插件 -> 合并后）：
   proactive_guard: enabled -> pg_enabled, timezone -> pg_timezone, target_sessions -> pg_target_sessions
   daily_digest   : timezone -> digest_timezone, target_sessions -> digest_target_sessions
-  meme_responder : enabled -> meme_enabled
   llm_guard      : 全部加 guard_ 前缀（enabled -> guard_enabled, mode -> guard_mode ...）
   system_health  : timezone -> health_timezone, target_sessions -> health_target_sessions,
                    show_disk -> health_show_disk, show_network -> health_show_network
-  Elaina 表情包  : 新增 meme_source / meme_dir（复用原插件同名键）
+  Elaina 表情包  : enabled -> meme_enabled（meme_dir / meme_probability 沿用原版键名；
+                   合并前 meme_responder 时代的 trigger_prob 仍作为兼容回退读取）
 - 主动消息门禁：合并插件内部主动发送（人格消息、日报、健康报告、表情包）通过
   门禁放行计数（owner._bypass_cnt）直接放行，其余插件/内置 Agent 的主动发送仍被拦截。
 
@@ -209,23 +210,12 @@ GUARD_DEFAULT_PROMPT = """你是{persona}
 时间点：{time_list}"""
 
 # ---------------------------------------------------------------------------
-# AI 表情包回复：默认配置
+# Elaina 表情包：默认配置（对齐原版 astrbot_plugin_Elaina_meme_Bridge）
 # ---------------------------------------------------------------------------
-DEFAULT_TRIGGER_PROB = 0.5  # 触发概率
-DEFAULT_MEME_KEYWORDS = "无语、开心、难过、加油、厉害了、干得漂亮、生气、尴尬、笑死、委屈、点赞、疑问"  # 备用随机关键词
-DEFAULT_API_URL_TANGDOUZ = "https://api.tangdouz.com/a/biaoq.php"
-DEFAULT_API_URL_APIHZ_SOGOU = "https://cn.apihz.cn/api/img/apihzbqbsougou.php"
-DEFAULT_API_URL_APIHZ_BAIDU = "https://cn.apihz.cn/api/img/apihzbqbbaidu.php"
-
-# 注入给 LLM 的提示词模板（要求 AI 输出关键词）
-MEME_PROMPT_TEMPLATE = (
-    "\n\n【附加指令（不要告诉用户）】\n"
-    "在正常回答用户的同时，请根据当前对话的情绪/语境，在心里想一个最适合此时发送的"
-    "表情包搜索关键词（2~6 个字，如：无语、开心、干得漂亮、加油、笑死、尴尬）。\n"
-    "请在你的回复末尾另起一行，单独输出一行，格式为：\n"
-    "{{MEME_KEYWORD}}关键词{{/MEME_KEYWORD}}\n"
-    "不要输出其他多余内容在这一行。若你判断完全不需要表情包，输出 {{MEME_KEYWORD}}无{{/MEME_KEYWORD}}。"
-)
+DEFAULT_MEME_PROBABILITY = 0.5  # 表情包发送概率（原版键名 meme_probability）
+DEFAULT_SEND_TIMEOUT = 30  # 表情包发送超时（秒）：平台媒体上传可能重试较久，超时即跳过
+DEFAULT_MAX_MEME_MB = 8  # 单个表情包文件大小上限（MB），超出跳过
+MEME_EXTENSIONS = (".gif", ".jpg", ".jpeg", ".png", ".webp")  # 原版支持的素材后缀
 
 # 图片格式魔数校验（防止把 HTML 错误页/防盗链响应当图片上传 -> QQ 官方接口拒收返回 None）
 MAX_MEME_BYTES = 8 * 1024 * 1024  # 8MB 上限，超出跳过（QQ 官方媒体有大小限制）
@@ -2834,25 +2824,46 @@ class ProactiveGuardCore(_PluginCoreBase):
         return chunks
 
 # ===========================================================================
-# 核心四：Elaina 表情包（本地表情库 + 关键词在线抓图，合并 memeresponder 与 Elaina_meme_Bridge）
-# 用户消息按概率触发，AI 输出表情关键词，调用免费表情包搜索 API 抓图发送。
+# 核心四：Elaina 表情包（本地表情库 + AI 选图，对齐原版 astrbot_plugin_Elaina_meme_Bridge）
+# LLM 回复后按概率触发：让 AI 根据对话内容从本地表情库里挑一张最合适的发送。
+# 只发本地素材，不做联网表情包搜索 —— 在线搜图容易「搜错、发错、被防盗链」。
 # ===========================================================================
 class ElainaMemeCore(_PluginCoreBase):
-    """Elaina 表情包核心：支持「本地表情库（AI 选图）」与「关键词在线抓图」两种模式。
+    """Elaina 表情包核心：AI 从本地表情库选图，随 AI 回复发送。
 
-    - library：从本地表情包目录里让 AI 挑一张（原 astrbot_plugin_Elaina_meme_Bridge 行为）；
-    - keyword：让 AI 顺带输出表情关键词，从免费 API 抓图（原 meme_responder 行为）；
-    - auto（默认）：本地有表情库时用 library，否则回退 keyword。
+    对齐原版 astrbot_plugin_Elaina_meme_Bridge 的行为：
+    - 触发点：LLM 回复之后（`on_llm_response`，priority=99999），按 `meme_probability` 掷骰子；
+    - 对话上下文：以 **AI 自己的回复文本** 为准（回复为空才回退用户消息）；
+    - 选图：把表情包文件名列表 + 对话内容交给 AI，让它只回一个文件名；
+    - 兜底：AI 选的文件名不在库里时随机挑一张；
+    - 素材目录：配置 `meme_dir` -> 插件目录 `meme/` -> AstrBot `plugins/*/meme`。
+
+    相对原版的两点工程化补强（不改变对外行为）：
+    - AI 回答带引号/多余说明时，用「包含匹配」再对齐一次文件名（原版只做全等匹配，
+      不命中就随机，容易发得不准）；
+    - 发送走 `owner._gated_send`（合并插件的门禁放行通道）并带超时，避免平台媒体
+      上传卡住时阻塞事件流水线。
     """
 
     def __init__(self, owner: "ElainaSuitePlugin") -> None:
         super().__init__(owner)
-        # 本次触发的会话标记：{key: ts}，on_llm_request 注入提示词，on_llm_response 消费
-        self._triggers: dict[str, float] = {}
-        # 本地表情库（懒加载）
+        # 本地表情库（懒加载，只解析一次）
         self._meme_dir: str = ""
         self._meme_list: list[str] = []
         self._meme_dir_ready = False
+
+    async def initialize(self) -> None:
+        """插件激活时预加载本地表情库（原版在 __init__ 里加载，效果相同）。"""
+        memes = self._load_memes()
+        if memes:
+            logger.info(
+                f"[elaina_meme] 本地表情库就绪：{self._meme_dir}（{len(memes)} 个表情包）"
+            )
+        else:
+            logger.warning(
+                "[elaina_meme] 未找到本地表情库，表情包不会发送；"
+                "请把表情图放进插件目录 meme/，或设置 meme_dir 指向素材目录"
+            )
 
     # ------------------------------------------------------------------ 工具
     def _cfg(self, key: str, default):
@@ -2879,128 +2890,28 @@ class ElainaMemeCore(_PluginCoreBase):
         except (TypeError, ValueError):
             return default
 
-    @staticmethod
-    def _http_get_json(url: str, timeout: int = 20) -> object:
-        """GET 请求并解析 JSON，失败抛异常。"""
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Referer": "https://api.aa1.cn/",
-                "Accept": "application/json, */*",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-        return json.loads(data.decode("utf-8", errors="replace"))
-
-    @staticmethod
-    def _http_get_bytes(url: str, timeout: int = 20) -> bytes:
-        """GET 请求获取原始字节（图片下载）。"""
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Referer": "https://api.aa1.cn/",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-
-    # ------------------------------------------------------------ 表情包 API
-    async def _fetch_meme_images(self, keyword: str) -> list[str]:
-        """按关键词搜索表情包，多源降级，返回图片 URL 列表。"""
-        errors: list[str] = []
-        for source in ("tangdouz", "apihz_sogou", "apihz_baidu"):
-            try:
-                urls = await self._fetch_from_source(source, keyword)
-                if urls:
-                    logger.info(f"[meme_responder] 数据源 {source} 返回 {len(urls)} 张表情包")
-                    return urls
-                errors.append(f"{source}: 空结果")
-            except Exception as e:
-                errors.append(f"{source}: {e}")
-                logger.warning(f"[meme_responder] 数据源 {source} 失败: {e}")
-        logger.warning(f"[meme_responder] 表情包搜索全部失败: {'; '.join(errors)}")
-        return []
-
-    async def _fetch_from_source(self, source: str, keyword: str) -> list[str]:
-        kw = urllib.parse.quote(keyword)
-        if source == "tangdouz":
-            url = f"{self._cfg('api_url_tangdouz', DEFAULT_API_URL_TANGDOUZ)}?return=json&nr={kw}"
-            data = await asyncio.to_thread(self._http_get_json, url)
-            if not isinstance(data, list):
-                return []
-            out = []
-            for item in data:
-                if isinstance(item, dict):
-                    src = item.get("thumbSrc") or item.get("thumb") or ""
-                    if src:
-                        out.append(str(src))
-            return out
-        if source == "apihz_sogou":
-            url = self._cfg("api_url_apihz_sogou", DEFAULT_API_URL_APIHZ_SOGOU)
-        else:
-            url = self._cfg("api_url_apihz_baidu", DEFAULT_API_URL_APIHZ_BAIDU)
-        params = {
-            "id": str(self._cfg("apihz_id", "")),
-            "key": str(self._cfg("apihz_key", "")),
-            "words": keyword,
-            "limit": str(self._cfg_int("meme_count", 10)),
-            "page": "1",
-        }
-        qs = urllib.parse.urlencode(params)
-        data = await asyncio.to_thread(self._http_get_json, f"{url}?{qs}")
-        # apihz 返回 {"code":..., "data": [...]} 或 {"code":..., "list": [...]}
-        if isinstance(data, dict):
-            if data.get("code") not in (0, 200, 1, "0", "200", "1"):
-                raise RuntimeError(f"apihz 返回错误: {data.get('msg') or data.get('code')}")
-            arr = data.get("data") or data.get("list") or data.get("result") or []
-        else:
-            arr = data
-        out = []
-        if isinstance(arr, list):
-            for item in arr:
-                if isinstance(item, dict):
-                    src = (
-                        item.get("thumbSrc")
-                        or item.get("thumb")
-                        or item.get("url")
-                        or item.get("image")
-                        or ""
-                    )
-                    if src:
-                        out.append(str(src))
-        return out
-
-    @staticmethod
-    def _pick_meme_url(urls: list[str]) -> str | None:
-        """随机取一张表情包图片 URL。"""
-        if not urls:
-            return None
-        return random.choice(urls)
-
-    async def _download_meme(self, url: str) -> bytes | None:
-        """下载表情包图片并校验格式；失败/非法内容返回 None。"""
+    def probability(self) -> float:
+        """表情包发送概率：优先原版键名 meme_probability，兼容旧的 trigger_prob。"""
         try:
-            data = await asyncio.to_thread(self._http_get_bytes, url)
-        except Exception as e:
-            logger.warning(f"[meme_responder] 表情包下载失败 {url}: {e}")
-            return None
-        if not _is_valid_image(data, self._cfg_int("max_meme_mb", 8) * 1024 * 1024):
-            logger.warning(
-                f"[meme_responder] 下载内容不是有效图片或超出大小限制（可能被防盗链或返回 HTML），跳过: {url}"
-            )
-            return None
-        return data
+            has_new_key = "meme_probability" in self.config
+        except Exception:
+            has_new_key = False
+        raw = (
+            self._cfg("meme_probability", DEFAULT_MEME_PROBABILITY)
+            if has_new_key
+            else self._cfg("trigger_prob", DEFAULT_MEME_PROBABILITY)
+        )
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = DEFAULT_MEME_PROBABILITY
+        return max(0.0, min(1.0, value))
 
-    # ---------------------------------------------------------------- 事件
     # ------------------------------------------------------------ 本地表情库
     def _resolve_meme_dir(self) -> str:
         """确定本地表情包目录：配置 meme_dir > 插件目录/meme > AstrBot plugins 下任意 */meme。
 
-        第三顺位让本插件可以自动复用已安装的 Elaina 表情包插件的素材目录，
-        无需手动拷贝表情图。
+        第三顺位让本插件也能自动复用「单独安装的原版 Elaina 表情包插件」的 meme/ 素材目录。
         """
         if self._meme_dir_ready:
             return self._meme_dir
@@ -3025,8 +2936,7 @@ class ElainaMemeCore(_PluginCoreBase):
         for path in candidates:
             try:
                 if path and os.path.isdir(path) and any(
-                    f.lower().endswith((".gif", ".jpg", ".jpeg", ".png", ".webp"))
-                    for f in os.listdir(path)
+                    f.lower().endswith(MEME_EXTENSIONS) for f in os.listdir(path)
                 ):
                     self._meme_dir = path
                     logger.info(f"[elaina_meme] 本地表情库: {path}")
@@ -3043,9 +2953,7 @@ class ElainaMemeCore(_PluginCoreBase):
             return []
         try:
             self._meme_list = sorted(
-                f
-                for f in os.listdir(path)
-                if f.lower().endswith((".gif", ".jpg", ".jpeg", ".png", ".webp"))
+                f for f in os.listdir(path) if f.lower().endswith(MEME_EXTENSIONS)
             )
             logger.info(f"[elaina_meme] 已加载 {len(self._meme_list)} 个本地表情包")
         except Exception as e:
@@ -3053,25 +2961,12 @@ class ElainaMemeCore(_PluginCoreBase):
             self._meme_list = []
         return self._meme_list
 
-    @property
-    def source(self) -> str:
-        """表情包来源模式：library / keyword / auto（默认）。"""
-        value = str(self._cfg("meme_source", "auto") or "auto").strip().lower()
-        return value if value in ("library", "keyword", "auto") else "auto"
-
-    def use_library(self) -> bool:
-        """当前是否走本地表情库分支。"""
-        if self.source == "keyword":
-            return False
-        if self.source == "library":
-            return True
-        return bool(self._load_memes())
-
+    # ---------------------------------------------------------------- 选图
     async def _ask_ai_choose_meme(
         self, event: AstrMessageEvent, conversation: str
     ) -> str:
-        """让 AI 从本地表情库中挑一个文件名。"""
-        names = "\n".join(self._meme_list[:200])
+        """让 AI 从本地表情库中挑一个文件名（原版提示词）。"""
+        names = "\n".join(self._meme_list)
         prompt = (
             "你是一个表情包助手，名叫 Elaina。根据以下对话内容，"
             "从表情包列表中选择一个最合适的表情包。\n\n"
@@ -3097,28 +2992,52 @@ class ElainaMemeCore(_PluginCoreBase):
             return ""
 
     @staticmethod
+    def _match_meme_name(answer: str, memes: list[str]) -> str:
+        """把 AI 的回答对齐到表情库里的真实文件名。
+
+        ① 全等（原版行为）-> ② 回答里出现了唯一一个文件名 -> ③ 命中多个时取最长的那个。
+        都不命中返回空串，由调用方随机兜底。
+        """
+        text = (answer or "").strip().strip("`'\"“”《》[]【】").strip()
+        if not text:
+            return ""
+        if text in memes:
+            return text
+        hits = [m for m in memes if m in text]
+        if not hits:
+            return ""
+        if len(hits) == 1:
+            return hits[0]
+        return max(hits, key=len)
+
+    # ---------------------------------------------------------------- 发送
+    @staticmethod
     def _read_local_file(path: str) -> bytes:
         with open(path, "rb") as f:
             return f.read()
 
-    async def _send_local_meme(self, event: AstrMessageEvent) -> bool:
+    async def _send_local_meme(self, event: AstrMessageEvent, resp=None) -> bool:
         """从本地表情库选一张并发送（格式/大小校验 + 超时）。"""
         memes = self._load_memes()
         if not memes:
             logger.warning("[elaina_meme] 本地表情库为空，跳过")
             return False
-        try:
-            conversation = (event.message_str or "").strip()
-        except Exception:
-            conversation = ""
-        chosen = await self._ask_ai_choose_meme(event, conversation)
-        if chosen not in memes:
-            if chosen:
-                logger.info(f"[elaina_meme] AI 选择 `{chosen}` 不在库中，改用随机一张")
+        # 原版以 AI 自己的回复文本作为「对话内容」；回复为空才回退用户消息
+        conversation = self._llm_text(resp)
+        if not conversation:
+            try:
+                conversation = (event.message_str or "").strip()
+            except Exception:
+                conversation = ""
+        answer = await self._ask_ai_choose_meme(event, conversation)
+        chosen = self._match_meme_name(answer, memes)
+        if not chosen:
+            if answer:
+                logger.info(f"[elaina_meme] AI 选择 `{answer}` 不在库中，改用随机一张")
             chosen = random.choice(memes)
         path = os.path.join(self._resolve_meme_dir(), chosen)
-        timeout = self._cfg_int("send_timeout", 30)
-        max_bytes = self._cfg_int("max_meme_mb", 8) * 1024 * 1024
+        timeout = self._cfg_int("send_timeout", DEFAULT_SEND_TIMEOUT)
+        max_bytes = self._cfg_int("max_meme_mb", DEFAULT_MAX_MEME_MB) * 1024 * 1024
         try:
             data = await asyncio.to_thread(self._read_local_file, path)
         except Exception as e:
@@ -3145,176 +3064,22 @@ class ElainaMemeCore(_PluginCoreBase):
             logger.error(f"[elaina_meme] 发送本地表情包失败 {chosen}: {e}")
             return False
 
-    async def on_message(self, event: AstrMessageEvent):
-        """用户消息到达时：按概率决定本次是否触发表情包回复。"""
+    # ---------------------------------------------------------------- 事件
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """LLM 回复后：按概率让 AI 从本地表情库挑一张发送（原版行为）。"""
         if not self._cfg_bool("meme_enabled", True):
             return
-        # 只对普通用户消息触发（忽略指令与空消息）
-        text = (event.message_str or "").strip()
-        if not text or text.startswith("/"):
+        if not self._load_memes():
             return
-        prob = max(0.0, min(1.0, self._cfg_float("trigger_prob", DEFAULT_TRIGGER_PROB)))
+        prob = self.probability()
         if random.random() > prob:
             return
-        # 标记本次会话触发（on_llm_request 注入提示词）
-        key = self._trigger_key(event)
-        self._triggers[key] = time.time()
-        logger.debug(f"[meme_responder] 本次触发表情包（prob={prob}）")
-
-    def _trigger_key(self, event: AstrMessageEvent) -> str:
-        return f"{event.unified_msg_origin}:::{event.get_sender_id()}"
-
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """LLM 请求前（关键词模式）：若本次已触发，注入表情关键词提示词。
-
-        本地表情库模式无需注入（在回复阶段直接让 AI 从库里选图）。
-        """
-        key = self._trigger_key(event)
-        if key not in self._triggers:
-            return
-        if self.use_library():
-            return
-        # 注入提示词（临时内容块，不写入历史）
-        template = self._cfg("meme_prompt", MEME_PROMPT_TEMPLATE)
-        try:
-            from astrbot.core.agent.message import TextPart
-
-            part = TextPart(text=template).mark_as_temp()
-        except Exception:
-            part = {"type": "text", "text": template}
-        req.extra_user_content_parts.append(part)
-
-    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """LLM 回复后：剥离关键词标记，解析关键词，抓取表情包并发送。"""
-        key = self._trigger_key(event)
-        if key not in self._triggers:
-            return
-        self._triggers.pop(key, None)  # 一次性消费
-        text = self._llm_text(resp)
-        if not text:
-            return
-        # 1) 从回复文本中剥离 {{MEME_KEYWORD}} 标记行（避免标记发给用户）
-        clean_text = self._strip_meme_mark(text)
-        if clean_text != text:
-            self._set_llm_text(resp, clean_text)
-            logger.debug("[meme_responder] 已从回复中剥离表情关键词标记")
-        # 2) 本地表情库模式：让 AI 从库里挑一张直接发送（原 Elaina 表情包行为）
-        if self.use_library():
-            await self._send_local_meme(event)
-            return
-        # 3) 关键词模式：解析关键词并在线抓图发送
-        keyword = self._parse_keyword(text)
-        if not keyword:
-            logger.debug("[meme_responder] AI 未给出表情关键词，跳过")
-            return
-        logger.info(f"[meme_responder] AI 表情关键词: {keyword}")
-        urls = await self._fetch_meme_images(keyword)
-        if not urls:
-            logger.warning("[meme_responder] 未获取到表情包，跳过")
-            return
-        timeout = self._cfg_int("send_timeout", 30)
-        random.shuffle(urls)
-        sent = False
-        # 最多尝试 3 张：下载校验 -> 发送（带超时，避免 QQ 官方媒体上传重试阻塞过久）
-        for url in urls[:3]:
-            data = await self._download_meme(url)
-            if not data:
-                continue
-            try:
-                from astrbot.api.message_components import Image as AImage
-
-                img = AImage.fromBytes(data)
-                chain = MessageChain(chain=[img])
-                await asyncio.wait_for(
-                    self.owner._gated_send(event.unified_msg_origin, chain),
-                    timeout=timeout,
-                )
-                logger.info(f"[meme_responder] 已发送表情包（关键词: {keyword}）")
-                sent = True
-                break
-            except Exception as e:
-                logger.warning(
-                    f"[meme_responder] 发送表情包失败（{url}），尝试下一张: {e}"
-                )
-        if not sent:
-            logger.error(
-                f"[meme_responder] 表情包发送失败（关键词: {keyword}），已跳过（不影响文字回复）"
-            )
-
-    @staticmethod
-    def _strip_meme_mark(text: str) -> str:
-        """从 LLM 回复中移除 {{MEME_KEYWORD}}...{{/MEME_KEYWORD}} 标记（含所在行）。"""
-        if not text:
-            return text
-        # 标记独立成行（前面只有空白或行首）：连行删除
-        cleaned = re.sub(
-            r"^[ \t]*\{\{MEME_KEYWORD\}\}.*?\{\{/MEME_KEYWORD\}\}[ \t]*\n?",
-            "",
-            text,
-            flags=re.M | re.S,
-        )
-        # 标记出现在行中：仅删标记本身
-        cleaned = re.sub(
-            r"\{\{MEME_KEYWORD\}\}.*?\{\{/MEME_KEYWORD\}\}",
-            "",
-            cleaned,
-            flags=re.S,
-        )
-        cleaned = re.sub(r"[ \t]*\n[ \t]*", "\n", cleaned)  # 清理空行残留空白
-        cleaned = cleaned.strip()
-        # 兜底：行首 MEME: 前缀行
-        cleaned = re.sub(r"^MEME:[^\n]*\n?", "", cleaned)
-        return cleaned.strip()
-
-    @staticmethod
-    def _set_llm_text(resp, text: str) -> None:
-        """就地修改 LLM 响应的文本内容（各版本字段名兼容）。"""
-        if resp is None:
-            return
-        for attr in ("completion_text", "result", "text"):
-            try:
-                if hasattr(resp, attr):
-                    setattr(resp, attr, text)
-                    return
-            except Exception:
-                continue
-        try:
-            rc = getattr(resp, "result_chain", None)
-            if rc is not None and hasattr(rc, "chain"):
-                for comp in rc.chain:
-                    if getattr(comp, "type", None) == "Plain" or type(comp).__name__ == "Plain":
-                        try:
-                            comp.text = text
-                            return
-                        except Exception:
-                            continue
-        except Exception:
-            pass
-
-    @staticmethod
-    def _parse_keyword(text: str) -> str:
-        """从 LLM 回复中提取表情关键词。
-
-        只认两种显式格式，避免把正常回复误判为关键词：
-        - {{MEME_KEYWORD}}关键词{{/MEME_KEYWORD}}（推荐）
-        - 独立行 MEME:关键词（兜底）
-        """
-        if not text:
-            return ""
-        m = re.search(r"\{\{MEME_KEYWORD\}\}(.*?)\{\{/MEME_KEYWORD\}\}", text, re.S)
-        if m:
-            kw = m.group(1).strip()
-            return "" if kw in ("无", "none", "None", "-") else kw
-        # 兜底：独立行 "MEME:关键词"
-        for line in reversed(text.splitlines()):
-            line = line.strip()
-            if line.startswith("MEME:"):
-                kw = line[5:].strip()
-                return "" if kw in ("无", "none") else kw
-        return ""
+        logger.debug(f"[elaina_meme] 本次触发表情包（prob={prob}）")
+        await self._send_local_meme(event, resp)
 
     @staticmethod
     def _llm_text(resp) -> str:
+        """取 LLM 回复正文（各版本字段名兼容）。"""
         if resp is None:
             return ""
         for attr in ("completion_text", "result", "text"):
@@ -3335,8 +3100,10 @@ class ElainaMemeCore(_PluginCoreBase):
         return ""
 
     async def terminate(self) -> None:
-        """插件卸载时清理触发状态。"""
-        self._triggers.clear()
+        """插件卸载时清空表情库缓存。"""
+        self._meme_list = []
+        self._meme_dir = ""
+        self._meme_dir_ready = False
 
 
 # ===========================================================================
@@ -4192,10 +3959,11 @@ class ElainaSuitePlugin(Star):
     # 生命周期
     # ------------------------------------------------------------------ #
     async def initialize(self) -> None:
-        """插件激活时：注册日报/健康报告定时任务 + 安装门禁/注册人格消息定时任务。"""
+        """插件激活时：注册定时任务 + 安装门禁 + 预加载本地表情库。"""
         await self.daily_digest.initialize()
         await self.proactive_guard.initialize()
         await self.system_health.initialize()
+        await self.meme.initialize()
 
     async def terminate(self) -> None:
         """插件禁用/重载时：依次清理 6 个核心。"""
@@ -4206,17 +3974,12 @@ class ElainaSuitePlugin(Star):
         await self.system_health.terminate()
 
     # ------------------------------------------------------------------ #
-    # 消息事件路由（3 个观察者互不干扰）
+    # 消息事件路由（2 个观察者互不干扰）
     # ------------------------------------------------------------------ #
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def image_bridge_on_message(self, event: AstrMessageEvent):
         """图片问答桥接：识别图片/表情并挂起；纯图片消息拦截等待提问。"""
         await self.image_bridge.on_message(event)
-
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def meme_on_message(self, event: AstrMessageEvent):
-        """表情包回复：按概率标记本次会话触发。"""
-        await self.meme.on_message(event)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def guard_on_user_message(self, event: AstrMessageEvent):
@@ -4232,18 +3995,13 @@ class ElainaSuitePlugin(Star):
         await self.image_bridge.on_llm_request(event, req)
 
     @filter.on_llm_request()
-    async def meme_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """表情包回复（关键词模式）：若本次已触发，注入表情关键词提示词。"""
-        await self.meme.on_llm_request(event, req)
-
-    @filter.on_llm_request()
     async def llm_guard_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 拦截兜底：挂兜底错误文案 + 记录请求快照。"""
         await self.llm_guard.on_llm_request(event, req)
 
     @filter.on_llm_response(priority=99999)
     async def meme_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """表情包回复：本地表情库（AI 选图）或关键词抓图，然后发送。"""
+        """表情包：按概率让 AI 从本地表情库挑一张，随回复发送。"""
         await self.meme.on_llm_response(event, resp)
 
     @filter.on_decorating_result()

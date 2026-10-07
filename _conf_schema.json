@@ -300,56 +300,27 @@
   "meme_enabled": {
     "type": "bool",
     "default": true,
-    "description": "【表情包回复】总开关（原 meme_responder 的 enabled 配置项）"
+    "description": "【Elaina 表情包】总开关（原版 astrbot_plugin_Elaina_meme_Bridge 的 enabled，合并后改名避免与其它模块冲突）"
   },
-  "trigger_prob": {
+  "meme_probability": {
     "type": "float",
     "default": 0.5,
-    "description": "【表情包回复】触发概率（0~1）：用户发消息后有多大概率让 AI 附带表情包回复，默认 0.5"
+    "description": "【Elaina 表情包】发送概率（0~1）：AI 每次回复后有多大概率附带一张本地表情包（原版默认 0.5）"
   },
-  "meme_prompt": {
-    "type": "text",
-    "description": "【表情包回复】注入给 AI 的表情关键词提示词模板（要求 AI 在回复末尾输出 {{MEME_KEYWORD}}关键词{{/MEME_KEYWORD}}）",
-    "default": "\n\n【附加指令（不要告诉用户）】\n在正常回答用户的同时，请根据当前对话的情绪/语境，在心里想一个最适合此时发送的表情包搜索关键词（2~6 个字，如：无语、开心、干得漂亮、加油、笑死、尴尬）。\n请在你的回复末尾另起一行，单独输出一行，格式为：\n{{MEME_KEYWORD}}关键词{{/MEME_KEYWORD}}\n不要输出其他多余内容在这一行。若你判断完全不需要表情包，输出 {{MEME_KEYWORD}}无{{/MEME_KEYWORD}}。"
-  },
-  "api_url_tangdouz": {
+  "meme_dir": {
     "type": "string",
-    "description": "【表情包回复】表情包搜索主接口（tangdouz，免费免 Key）：?return=json&nr={关键词}",
-    "default": "https://api.tangdouz.com/a/biaoq.php"
-  },
-  "api_url_apihz_sogou": {
-    "type": "string",
-    "description": "【表情包回复】备用接口：apihz 搜狗版（需 id/key）",
-    "default": "https://cn.apihz.cn/api/img/apihzbqbsougou.php"
-  },
-  "api_url_apihz_baidu": {
-    "type": "string",
-    "description": "【表情包回复】备用接口：apihz 百度版（需 id/key）",
-    "default": "https://cn.apihz.cn/api/img/apihzbqbbaidu.php"
-  },
-  "apihz_id": {
-    "type": "string",
-    "description": "【表情包回复】apihz 接口 ID（备用源用，可留空；留空则跳过 apihz 源）",
+    "description": "【Elaina 表情包】本地表情包目录",
+    "hint": "留空则自动检测：插件目录/meme（自带原版 50 个素材）→ AstrBot plugins 下任意 */meme。",
     "default": ""
-  },
-  "apihz_key": {
-    "type": "string",
-    "description": "【表情包回复】apihz 接口 KEY（备用源用，可留空）",
-    "default": ""
-  },
-  "meme_count": {
-    "type": "int",
-    "description": "【表情包回复】每次搜索结果数量（apihz 源用），随机取一张",
-    "default": 10
   },
   "send_timeout": {
     "type": "int",
-    "description": "表情包发送超时（秒）：QQ 官方等平台媒体上传可能重试较久，超时后自动尝试下一张/跳过（默认 30 秒）",
+    "description": "【Elaina 表情包】发送超时（秒）：平台媒体上传可能重试较久，超时后跳过本次表情包（默认 30 秒）",
     "default": 30
   },
   "max_meme_mb": {
     "type": "int",
-    "description": "表情包文件大小上限（MB），超过则跳过（QQ 官方媒体上传有大小限制，默认 8）",
+    "description": "【Elaina 表情包】单个表情包文件大小上限（MB），超过则跳过（QQ 官方媒体上传有大小限制，默认 8）",
     "default": 8
   },
   "guard_enabled": {
@@ -460,16 +431,5 @@
     "type": "bool",
     "description": "[系统健康报告] 是否显示网络接口信息",
     "default": false
-  },
-  "meme_source": {
-    "type": "string",
-    "description": "[Elaina 表情包] 来源模式：library（本地表情库 AI 选图）/ keyword（关键词在线抓图）/ auto（默认，有本地库则用 library）",
-    "default": "auto"
-  },
-  "meme_dir": {
-    "type": "string",
-    "description": "[Elaina 表情包] 本地表情包目录",
-    "hint": "留空则自动检测：插件目录/meme → AstrBot plugins 下任意 */meme（可复用已安装的 Elaina 表情包素材）。",
-    "default": ""
   }
 }

@@ -8,3 +8,10 @@
 *.txt text eol=lf
 *.gitignore text eol=lf
 LICENSE text eol=lf
+
+# 表情包素材是二进制，禁止任何换行符/编码转换
+meme/*.gif binary
+meme/*.jpg binary
+meme/*.jpeg binary
+meme/*.png binary
+meme/*.webp binary

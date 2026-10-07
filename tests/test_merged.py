@@ -22,7 +22,8 @@ assert mod.USER_AGENT
 assert mod.DIGEST_DEFAULT_PROMPT and "每日简报" in mod.DIGEST_DEFAULT_PROMPT
 assert mod.GUARD_DEFAULT_PROMPT and "{persona}" in mod.GUARD_DEFAULT_PROMPT
 assert mod.DEFAULT_PROMPT_TEMPLATE and "{image_content}" in mod.DEFAULT_PROMPT_TEMPLATE
-assert mod.MEME_PROMPT_TEMPLATE and "MEME_KEYWORD" in mod.MEME_PROMPT_TEMPLATE
+assert mod.DEFAULT_MEME_PROBABILITY == 0.5
+assert mod.MEME_EXTENSIONS == (".gif", ".jpg", ".jpeg", ".png", ".webp")
 assert mod.GUARD_HARD_MARKERS and "content_filter" in mod.GUARD_HARD_MARKERS
 assert mod._guard_as_bool("true", False) is True and mod._guard_as_bool("0", True) is False
 assert mod._guard_as_int("60") == 60 and mod._guard_as_int("x", 5) == 5
@@ -77,7 +78,7 @@ config = {
     "block_proactive": True,
     "strict_mode": False,
     "meme_enabled": True,
-    "trigger_prob": 0.0,
+    "meme_probability": 0.0,
     "digest_timezone": "Asia/Shanghai",
     "pg_timezone": "Asia/Shanghai",
     "guard_enabled": True,
@@ -139,10 +140,9 @@ async def main():
 
     ev = FakeEvent()
     await pl.image_bridge.on_message(ev)
-    await pl.meme.on_message(ev)
     await pl.proactive_guard._on_user_message(ev)
     assert "aiocqhttp:Friend:1" in pl.proactive_guard._last_user_activity
-    print("[8] 三条消息事件路由执行 OK（纯文字 no-op / 概率 0 不触发 / 活跃记录）")
+    print("[8] 两条消息事件路由执行 OK（纯文字 no-op / 活跃记录）")
 
     pl.proactive_guard._last_user_activity["aiocqhttp:Friend:1"] = __import__("time").time()
     r2 = pl.proactive_guard._allow_send("aiocqhttp:Friend:1")
@@ -176,23 +176,92 @@ async def main():
     assert lg.match_reason("your request was blocked by policy") is not None
     print("[11] LlmGuardCore 拦截判定 OK")
 
-    # 12) Elaina 表情包本地库
+    # 12) Elaina 表情包：本地表情库 + AI 选图（对齐原版 Elaina_meme_Bridge，无联网搜索）
     tmp = tempfile.mkdtemp()
     with open(os.path.join(tmp, "你好.gif"), "wb") as f:
         f.write(b"GIF89a" + b"\x00" * 64)
     with open(os.path.join(tmp, "无语.png"), "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    with open(os.path.join(tmp, "not_an_image.txt"), "w", encoding="utf-8") as f:
+        f.write("ignore me")
     pl.config["meme_dir"] = tmp
-    pl.config["meme_source"] = "library"
     pl.meme._meme_dir_ready = False
     pl.meme._meme_list = []
-    assert pl.meme.use_library() is True
+    assert pl.meme._resolve_meme_dir() == tmp, pl.meme._resolve_meme_dir()
     memes = pl.meme._load_memes()
-    assert "你好.gif" in memes and "无语.png" in memes, memes
-    assert pl.meme.source == "library"
-    pl.config["meme_source"] = "keyword"
-    assert pl.meme.use_library() is False
-    print("[12] ElainaMemeCore 本地表情库 OK:", memes)
+    assert memes == ["你好.gif", "无语.png"], memes  # 只收图片后缀且排序
+
+    # 概率：原版键名 meme_probability 优先，旧 trigger_prob 兜底，越界钳制
+    pl.config["meme_probability"] = 0.25
+    assert pl.meme.probability() == 0.25
+    pl.config.pop("meme_probability")
+    pl.config["trigger_prob"] = 0.75
+    assert pl.meme.probability() == 0.75, "旧 trigger_prob 未生效"
+    pl.config.pop("trigger_prob")
+    pl.config["meme_probability"] = 5
+    assert pl.meme.probability() == 1.0
+    assert pl.meme._cfg_bool("meme_enabled", True) is True
+
+    # AI 回答 -> 表情库文件名对齐（全等 / 含说明文字 / 完全不命中）
+    assert pl.meme._match_meme_name("你好.gif", memes) == "你好.gif"
+    assert pl.meme._match_meme_name("我选 `无语.png`", memes) == "无语.png"
+    assert pl.meme._match_meme_name("随便发一个吧", memes) == ""
+
+    # on_llm_response 端到端：AI 选图命中 -> 经门禁放行通道发出
+    async def _meme_provider(umo=None):
+        return "p1"
+
+    async def _meme_generate(**kw):
+        assert "表情包列表" in kw["prompt"] and "你好.gif" in kw["prompt"], kw["prompt"]
+
+        class R:
+            completion_text = "无语.png"
+
+        return R()
+
+    ctx.get_current_chat_provider_id = _meme_provider
+    ctx.llm_generate = _meme_generate
+
+    class MemeResp:
+        completion_text = "今天天气不错"
+
+    def _image_sends():
+        """已发出的「本地图片链」条数。
+
+        日报/人格消息有后台定时任务会往 ctx.sent 里塞东西（本测试是 >= 而非 == 计数），
+        所以这里只数携 base64 图片的链，避免与后台发送互相干扰。
+        """
+        out = []
+        for args in ctx.sent:
+            if len(args) < 2 or not hasattr(args[1], "chain"):
+                continue
+            for comp in args[1].chain:
+                if str(getattr(comp, "file", "")).startswith("base64://"):
+                    out.append(args)
+                    break
+        return out
+
+    n0 = len(_image_sends())
+    pl.config["meme_probability"] = 1.0
+    await pl.meme.on_llm_response(ev, MemeResp())
+    sent = _image_sends()
+    assert len(sent) == n0 + 1, ctx.sent
+    assert sent[-1][0] == "aiocqhttp:Friend:1"
+    img = sent[-1][1].chain[0]
+    assert getattr(img, "file", "").startswith("base64://"), img
+
+    # 总开关关闭 -> 一张都不发
+    pl.config["meme_enabled"] = False
+    await pl.meme.on_llm_response(ev, MemeResp())
+    assert len(_image_sends()) == n0 + 1, "总开关关闭后仍发送了表情包"
+
+    # 概率为 0 -> 一张都不发
+    pl.config["meme_enabled"] = True
+    pl.config["meme_probability"] = 0.0
+    await pl.meme.on_llm_response(ev, MemeResp())
+    assert len(_image_sends()) == n0 + 1, "概率 0 仍发送了表情包"
+    pl.config["meme_probability"] = 1.0
+    print("[12] ElainaMemeCore 本地表情库 + AI 选图 OK:", memes)
 
     # 13) 系统健康报告
     if mod._psutil is not None:

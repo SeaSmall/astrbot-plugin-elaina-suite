@@ -7,7 +7,7 @@
 | 1 | 🖼 图片问答桥接（小米 MiMo → 百度图像识别 → OCR.space 三级识别） | `astrbot_plugin_image_bridge` |
 | 2 | 📰 每日简报（多城市天气 + 昨日国内/国际 + 科技/医药/政策前沿 + GitHub 日升榜，AI 总结定时推送） | `astrbot-plugin-daily-digest` |
 | 3 | 🚪 主动消息门禁 + 每日人格消息（拦截非本插件主动发言；预生成「明天」的随机时间点消息） | `astrbot-plugin-proactive-guard` |
-| 4 | 🎭 Elaina 表情包（本地表情库 AI 选图 / 关键词在线抓图，按概率随回复发送） | `astrbot_plugin_Elaina_meme_Bridge` + `astrbot_plugin_meme_responder` |
+| 4 | 🎭 Elaina 表情包（本地表情库 + AI 选图，按概率随回复发送，自带原版 50 个素材） | `astrbot_plugin_Elaina_meme_Bridge` |
 | 5 | 🛡 LLM 拦截兜底（挡住被泄漏的错误文案如 `content_filter` / `high risk`，可换备用 provider 重发） | `astrbot-plugin-llm-guard` |
 | 6 | 🖥 系统健康报告（CPU/内存/磁盘/运行时长/进程 → 图片定时推送） | `astrbot-plugin-system-health` |
 
@@ -30,11 +30,11 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 
 **3. 主动消息门禁 + 人格消息**：拦截「非本插件的 AI 主动发言」（用户没说话时一律不发）；每天后台预生成**明天**的 5-10 条人格消息，随机时间点，到点发送并删除；每日 06:00 重新生成，日复一日。
 
-**4. Elaina 表情包**：两种来源——
-- `library`（本地表情库）：让 AI 从本地表情包目录里挑一张发送（原 Elaina 表情包行为）；
-- `keyword`（关键词在线抓图）：AI 在回复里顺带给出表情关键词，从免费 API 抓图；
-- `auto`（默认）：本地有表情库就用 library，否则用 keyword。
-本地表情包目录**自动检测三顺位**：① 配置 `meme_dir` → ② 插件目录下 `meme/` → ③ AstrBot `plugins/*/meme`（可**直接复用**你已安装的 Elaina 表情包素材，无需拷贝）。
+**4. Elaina 表情包**：完全对齐原版 `astrbot_plugin_Elaina_meme_Bridge` —— AI 每次回复后按
+`meme_probability` 掷骰子，命中就把 **AI 自己的回复文本 + 表情包文件名列表** 交给 AI，让它挑一张最合适的本地表情包发送；AI 给出的名字不在库里时随机兜底一张。
+**只发本地素材，不做联网表情包搜索**（在线搜图容易搜错、发错、被防盗链）。
+插件**自带原版那 50 个表情包**（`meme/` 目录，装完即用），也可以换成自己的素材：
+本地表情包目录**自动检测三顺位**：① 配置 `meme_dir` → ② 插件目录下 `meme/` → ③ AstrBot `plugins/*/meme`（可**直接复用**你已单独安装的 Elaina 表情包素材，无需拷贝）。
 
 **5. LLM 拦截兜底**：发送前检查即将发出的文本，命中拦截特征（如 `content_filter` / `high risk`）时按 `guard_mode` 处理——默认 **替换**：把**用户提示词重新注入 LLM 再生成一次**（provider 默认用当前会话模型，无需配置；第 1 次带人设、第 2 次起只重发用户提示词，全部失败才用 `guard_fallback_text`）；也可选 `drop`（丢弃）/ `log`（仅记录）。`guard_dump_on_reject` 可把触发风控的完整 prompt 转存，便于定位根因。
 
@@ -61,35 +61,37 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 | --- | --- |
 | `proactive_guard` 的 `enabled` / `timezone` / `target_sessions` | `pg_enabled` / `pg_timezone` / `pg_target_sessions` |
 | `daily_digest` 的 `timezone` / `target_sessions` | `digest_timezone` / `digest_target_sessions` |
-| `meme_responder` 的 `enabled` | `meme_enabled` |
+| `Elaina_meme_Bridge` 的 `enabled` | `meme_enabled`（`meme_probability` / `meme_dir` 沿用原版同名键） |
 | `llm_guard` 的全部键 | 统一加 `guard_` 前缀（`guard_enabled` / `guard_mode` …） |
 | `system_health` 的 `timezone` / `target_sessions` / `show_disk` / `show_network` | `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network` |
 
 - **门禁放行自身**：合并插件内部的主动发送（日报、人格消息、健康报告、表情包）在发送期间把
   `_bypass_cnt` 加一，门禁直接放行；其它插件 / AstrBot 内置主动 Agent 仍被拦截。
   （单插件版曾出现的「日报被门禁拦掉」问题，在合并版里从结构上不存在。）
-- **钩子清单**：`event_message_type(ALL)` × 3（图片桥接 / 表情包 / 门禁活跃记录）、
-  `on_llm_request` × 3（图片注入 / 表情关键词 / 拦截兜底快照）、`on_llm_response` × 1（表情包）、
+- **钩子清单**：`event_message_type(ALL)` × 2（图片桥接 / 门禁活跃记录）、
+  `on_llm_request` × 2（图片注入 / 拦截兜底快照）、`on_llm_response` × 1（表情包，`priority=99999`）、
   `on_decorating_result` × 1（拦截兜底）——互不抢占，全部生效。
 - **指令清单**：`/digest`(`/日报`)、`/订阅日报`、`/退订日报`、`/今日计划`、`/重建今日计划`、
   `/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 88 项，按前缀分组：
+配置面板里共 82 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_target_sessions` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_medical` / `feeds_policy` / `llm_prompt`
 - **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
-- **Elaina 表情包**：`meme_enabled` / `meme_source` / `meme_dir` / `trigger_prob` / `meme_prompt` / `api_url_tangdouz` / `api_url_apihz_sogou` / `api_url_apihz_baidu` / `apihz_id` / `apihz_key` / `meme_count` / `send_timeout` / `max_meme_mb`
+- **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
 
 ## ❓ 常见问题
 
 **Q：表情包发不出去？**
-- 检查本地表情库是否被识别（日志 `[elaina_meme] 本地表情库: ...`）；未识别就把表情图放进插件目录 `meme/`，或把 `meme_dir` 指向已有素材目录；
-- QQ 官方平台媒体上传偶发失败时，插件会校验图片格式/大小、最多换 3 张重试、超时放弃，不会卡死（详见更新日志）。
+- 插件启动时会打印 `[elaina_meme] 本地表情库就绪：…（N 个表情包）`；若打印的是「未找到本地表情库」，说明 `meme/` 缺失或 `meme_dir` 指错了；
+- 一个都不发：确认 `meme_enabled` 打开、`meme_probability` > 0（默认 0.5）；
+- 发的是「随机一张」而不是 AI 选的那张：说明 AI 回的文件名没对上（日志里会有 `AI 选择 \`xxx\` 不在库中，改用随机一张`），换个更强的对话模型通常就好；
+- QQ 官方平台媒体上传偶发失败时，插件会校验图片魔数/大小并带 `send_timeout` 超时，不会卡死（详见更新日志）。
 **Q：日报里出现 `high risk` 之类的报错文案？**
 - 那是服务商内容安全拦截，本插件的第 5 个功能（LLM 拦截兜底）会自动挡掉；日报侧还有「精简重试 + 模板兜底」双保险。
 **Q：系统健康报告没发？**
@@ -101,5 +103,6 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## ⚠️ 免责声明
 
-- 抓取的新闻/表情包内容版权归原作者所有，仅供个人学习与自用。
+- 抓取的新闻内容版权归原作者所有，仅供个人学习与自用。
+- 内置的 50 个 Elaina 表情包来自 B 站「白之魔女-霜娜」（[b23.tv/CnZYwWY](https://b23.tv/CnZYwWY)），版权归原作者所有，**仅供个人学习，禁止商用**。
 - AI 生成内容仅供参考，请自行甄别。
