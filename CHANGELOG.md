@@ -185,3 +185,59 @@
 - `_conf_schema.json`：82 → **84** 项（新增 `digest_also_send_md`、`gov_policy_recent_days`，
   `feeds_policy` 默认值与描述更新，`digest_send_mode` 描述补 `both` 档）。
 - README 同步更新（日报特性段、配置项清单与数量、政策/划线/截断三条 FAQ）；metadata 版本 → 1.1.0。
+
+## v1.1.1（2026-10-16）
+
+### ✨ 主动消息接入记忆库 + 子代理流水线
+
+把 `astrbot-plugin-proactive-guard` v1.1.0 的两大能力**原样移植进整合包**。
+此前这两项只做进了独立仓库，整合包里的 `ProactiveGuardCore` 仍是 v1.0.4 的行为——
+这正是「`/记忆` 没反应、主动消息像陌生人打招呼」的原因。
+
+- **记忆库**：新增 `MEMORY_KEY = "memory_store"`。默认每天 03:00（`memory_cron`）把最近
+  `memory_turns`(20) 轮真实对话交给 AI，**滚动重写**成一份长期记忆（称呼 / 身份职业 /
+  正在做的事 / 长期偏好 / 情绪状态 / 人际关系 / 约定），存进 KV；生成主动消息时注入提示词
+  （`MEMORY_BLOCK_TEMPLATE` 明确要求「只是背景，不要直接复述、不要提及『记忆』『记录』这类词」）。
+  - **三级降级**保证第一次也有记忆：记忆库有内容 → 直接用；空 → 就地 `refresh_memory()`
+    总结一次；仍空 → 退回原始对话历史（由 `memory_raw_fallback` 控制）。
+  - **闭环**：`record_to_history` 打开时，发出的主动消息会以 assistant 角色写回会话历史，
+    第二天总结时又会被读进去——AI 因此记得自己昨天说过什么，不会天天重复同一句。
+  - 新增指令 `/记忆`（查看记忆库）、`/刷新记忆`（立刻总结一次）。
+- **子代理流水线**：从「一次调用写完全部」改为「规划 → 并行写手 → 审校」三段式。
+  规划代理给每个时间点定一句话要点；每个时间点由**独立写手**成文（`asyncio.Semaphore`
+  限流，`subagent_concurrency` 默认 3，`subagent_parallel=false` 时串行）；最后审校代理
+  统一语气并去重（`subagent_review`），条数不符时 warning 并回退写手原稿。
+  每个写手只背一个时间点的上下文，比单次生成更不容易串味。
+
+### 🐛 修复
+
+- **`_generate_and_store()` 里的「回退单次生成」此前是假的**（独立版同样存在）：
+  子代理流水线失败时返回空列表，调用方直接 `if not items:` 报「计划生成失败」并 return——
+  日志里那句「回退单次生成」和 README 的描述都没兑现。现在 `if not items:` 会**真的**再走一次
+  单次调用，并带 `try/except`（LLM 全挂时只记 warning，不把异常抛给调度器）。两个仓库同步修复。
+- 三段子代理提示词在独立版 v1.1.0 里写作 `你是{persona}`，而 `persona` 本身以「你是一个…」开头，
+  会渲染成「你是你是一个温柔…」；移植采用已修正的 `{persona}` 版本
+  （`GUARD_DEFAULT_PROMPT` 里的 `你是{persona}` 保持不变——它要的本来就是一个完整句子）。
+- `_parse_items()` / `_parse_points()` 对 `None` 会抛
+  `TypeError: expected string or bytes-like object, got 'NoneType'`；`_review_drafts()` 未防空；
+  `_clean_message()` 未做类型检查——均已补上显式类型判断。
+
+### ⚙️ 配置
+
+- `_conf_schema.json`：84 → **93** 项，新增 9 个：
+  `subagent_enabled` / `subagent_parallel` / `subagent_concurrency`(3) / `subagent_review` /
+  `memory_enabled` / `memory_cron`(`0 3 * * *`) / `memory_turns`(20) / `memory_max_chars`(1500) /
+  `memory_raw_fallback`。默认值与原独立插件完全一致。
+
+### 🧪 测试
+
+- `tests/test_merged.py` 新增第 **[18]** 组「记忆库 + 子代理流水线（含回退单次生成）」：
+  常量与提示词占位符、9 个新配置键、`_history_lines` 多模态只抽文本、`refresh_memory` 首次总结、
+  `_collect_memory` 读取、记忆注入子代理、规划失败**真的**回退单次调用、关闭态提示、
+  `_truncate_memory` 上限。全部 **19 组**冒烟测试通过（`ALL SMOKE TESTS PASSED`）。
+- 独立仓库侧 `pgtest_full.py` **107 项断言全部通过**。
+
+### 🔧 其它
+
+- README 同步（功能描述、指令清单、配置项数量 84→93 与键清单、
+  新增「`/记忆` 显示没有记忆怎么办」FAQ）；metadata 版本 → 1.1.1。

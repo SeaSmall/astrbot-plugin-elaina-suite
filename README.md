@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 1 | 🖼 图片问答桥接（小米 MiMo → 百度图像识别 → OCR.space 三级识别） | `astrbot_plugin_image_bridge` |
 | 2 | 📰 每日简报（多城市天气 + 昨日国内/国际 + 科技/医药/政策前沿 + GitHub 日升榜，AI 总结定时推送） | `astrbot-plugin-daily-digest` |
-| 3 | 🚪 主动消息门禁 + 每日人格消息（拦截非本插件主动发言；预生成「明天」的随机时间点消息） | `astrbot-plugin-proactive-guard` |
+| 3 | 🚪 主动消息门禁 + 每日人格消息（拦截非本插件主动发言；预生成「明天」的随机时间点消息；带记忆库，用规划→并行写手→审校三个子代理协作成文） | `astrbot-plugin-proactive-guard` |
 | 4 | 🎭 Elaina 表情包（本地表情库 + AI 选图，按概率随回复发送，自带原版 50 个素材） | `astrbot_plugin_Elaina_meme_Bridge` |
 | 5 | 🛡 LLM 拦截兜底（挡住被泄漏的错误文案如 `content_filter` / `high risk`，可换备用 provider 重发） | `astrbot-plugin-llm-guard` |
 | 6 | 🖥 系统健康报告（CPU/内存/磁盘/运行时长/进程 → 图片定时推送） | `astrbot-plugin-system-health` |
@@ -29,6 +29,7 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 **2. 每日简报**：天气支持**多城市**（默认上海）且内置防高并发（结果缓存 / 地理编码缓存 7 天 / 城市单飞锁 / 请求节流 / 失败隔离）；新闻源为**实时免费源**（央视 JSONP、腾讯热榜、百度热搜、中国日报、WHO、Nature Medicine）；**「政策前沿」直接接政府官方网站**（中国政府网最新政策 / 中国政府网要闻 / 国家发改委新闻发布），不再用新闻热榜凑数，且因为政策不是每天都有，该板块时效放宽为「最近 N 天」（`gov_policy_recent_days`，默认 30 天），窗口内无新政策则退回最新几条；GitHub 日升榜 6 路降级（GitHub Search → gh-proxy 镜像 → 全站热门 → OSS Insight → gitterapp）；AI 总结被内容安全拦截时自动精简重试 → 模板兜底；到点未发会每 5 分钟补发（直到 `send_deadline`）；长简报**图片与 .md 文件两份都给**（`digest_send_mode=both`），图片便于手机阅读、md 便于存档检索。
 
 **3. 主动消息门禁 + 人格消息**：拦截「非本插件的 AI 主动发言」（用户没说话时一律不发）；每天后台预生成**明天**的 5-10 条人格消息，随机时间点，到点发送并删除；每日 06:00 重新生成，日复一日。
+生成时会**先读记忆库**：每天 03:00 让 AI 把近期真实对话总结成「长期记忆要点」（称呼、身份职业、正在做的事、长期偏好、情绪状态、人际关系、约定）存进记忆库，写消息时注入提示词，AI 因此记得你是谁、在忙什么、聊过什么，而不是每天凭空寒暄；发出的消息再写回会话历史，形成闭环，避免今天重复昨天的话。成文由「规划 → 并行写手 → 审校」三个子代理协作完成（每个时间点一个独立写手，上下文更小、不易串味），规划或子代理失败时自动回退单次调用。
 
 **4. Elaina 表情包**：完全对齐原版 `astrbot_plugin_Elaina_meme_Bridge` —— AI 每次回复后按
 `meme_probability` 掷骰子，命中就把 **AI 自己的回复文本 + 表情包文件名列表** 交给 AI，让它挑一张最合适的本地表情包发送；AI 给出的名字不在库里时随机兜底一张。
@@ -72,15 +73,15 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
   `on_llm_request` × 2（图片注入 / 拦截兜底快照）、`on_llm_response` × 1（表情包，`priority=99999`）、
   `on_decorating_result` × 1（拦截兜底）——互不抢占，全部生效。
 - **指令清单**：`/digest`(`/日报`)、`/订阅日报`、`/退订日报`、`/今日计划`、`/重建今日计划`、
-  `/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
+  `/记忆`、`/刷新记忆`、`/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 84 项，按前缀分组：
+配置面板里共 93 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_medical` / `feeds_policy` / `llm_prompt`
-- **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
+- **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `subagent_enabled` / `subagent_parallel` / `subagent_concurrency` / `subagent_review` / `memory_enabled` / `memory_cron` / `memory_turns` / `memory_max_chars` / `memory_raw_fallback` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
@@ -104,6 +105,10 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - 两条消息平台的媒体上传可能各重试约 90 秒，插件对单个目标加了超时；**图片与 md 都失败**才会回退纯文本（会分块发送，`limit=3800` 字符/条）。
 **Q：系统健康报告没发？**
 - 多半是没装 psutil（日志有提示）；`pip install psutil` 后重载插件即可。
+**Q：`/记忆` 显示「还没有记忆」/ 主动消息不提聊过的事？**
+- 记忆是**后台攒出来**的：默认每天 03:00（`memory_cron`）才会总结一次，装好当天记忆库是空的属正常；想立刻要，用 `/刷新记忆` 手动触发一次。
+- 记忆的来源是**会话历史**，所以要能枚举到会话：如果 `pg_target_sessions` 留空且 AstrBot 的会话库读不到当前会话，总结就会没有对象（日志里 `记忆已更新：N 个会话` 的 N 会是 0）。这种情况直接填 `pg_target_sessions`，或在群里发一条消息后再 `/刷新记忆`。
+- 另外 `record_to_history` 打开时，插件自己发出的主动消息也会写回会话历史，这是**刻意**的：AI 才会记得自己昨天说过什么，不至于天天重复同一句。
 
 ## 📄 更新日志
 

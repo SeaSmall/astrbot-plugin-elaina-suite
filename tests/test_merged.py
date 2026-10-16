@@ -536,6 +536,129 @@ async def main():
     assert calls == {"image": 1, "md": 1, "text": 1}, calls
     print("[17] 日报政府官网政策源 + 图片/md 两份都给 OK")
 
+    # 18) 记忆库 + 子代理流水线（v1.1.1：与独立版 proactive-guard v1.1.0 对齐）
+    pg = pl.proactive_guard
+    # 测试桩的 KV 是 no-op，这里换成内存字典，便于验证记忆落库与读取
+    _kv = {}
+
+    async def _kv_get(key, default=None):
+        return _kv.get(key, default)
+
+    async def _kv_put(key, value):
+        _kv[key] = value
+
+    pg.get_kv_data = _kv_get
+    pg.put_kv_data = _kv_put
+    assert mod.MEMORY_KEY == "memory_store"
+    assert "{memory}" in mod.MEMORY_BLOCK_TEMPLATE
+    assert "{max_chars}" in mod.MEMORY_PROMPT and "{old}" in mod.MEMORY_PROMPT
+    for _c in (mod.PLANNER_PROMPT, mod.WRITER_PROMPT, mod.REVIEWER_PROMPT):
+        assert "{persona}" in _c, _c[:40]
+    # 18a) 配置键齐全（9 个新键）
+    _schema_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"
+    )
+    _schema = json.load(open(_schema_path, encoding="utf-8"))
+    for _k in ("memory_enabled", "memory_cron", "memory_turns", "memory_max_chars",
+               "memory_raw_fallback", "subagent_enabled", "subagent_parallel",
+               "subagent_concurrency", "subagent_review"):
+        assert _k in _schema, f"配置缺键 {_k}"
+    assert "【记忆】" in _schema["memory_enabled"]["description"]
+
+    class _Conv:
+        def __init__(self, h):
+            self.history = h
+
+    class _CM:
+        async def get_curr_conversation_id(self, umo):
+            return "cid1"
+
+        async def get_conversation(self, umo, cid):
+            return _Conv(json.dumps([
+                {"role": "user", "content": "我叫小鱼，正在做 AstrBot 插件"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "好的，记下了"},
+                    {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+                ]},
+            ], ensure_ascii=False))
+
+    _cm = _CM()
+    ctx.conversation_manager = _cm
+    # 18b) _history_lines：多模态只抽文本
+    _lines = await pg._history_lines(_cm, "umo1", 20)
+    assert any("小鱼" in x for x in _lines), _lines
+    assert any("好的" in x for x in _lines), _lines
+    assert not any("y.png" in x for x in _lines), _lines
+
+    async def _targets():
+        return ["umo1"]
+
+    pg._collect_target_sessions = _targets
+    _seen = {}
+
+    async def _mem_chat(prompt):
+        _seen["mem_prompt"] = prompt
+        return "用户叫小鱼，正在做 AstrBot 插件。"
+
+    pg._llm_chat = _mem_chat
+    _out = await pg.refresh_memory()
+    assert "小鱼" in _out, _out
+    assert "（暂无）" in _seen["mem_prompt"], "首次总结应显示「暂无」旧摘要"
+    _store = await pg.get_kv_data("memory_store", None)
+    assert _store and _store["items"][0]["umo"] == "umo1", _store
+    # 18c) _collect_memory：生成时能读到
+    _mem = await pg._collect_memory()
+    assert "小鱼" in _mem, _mem
+
+    # 18d) _generate_and_store：记忆进子代理 + 规划失败时真的回退单次调用
+    pg._random_times = lambda n: ["07:35"]
+
+    async def _subagents_fail(date, times, time_list, count, persona, memory_block):
+        _seen["sub_block"] = memory_block
+        return []          # 模拟规划代理失败
+
+    pg._generate_with_subagents = _subagents_fail
+
+    async def _gen_chat(prompt):
+        _seen["gen_prompt"] = prompt
+        return json.dumps([{"time": "07:35", "text": "早呀"}], ensure_ascii=False)
+
+    pg._llm_chat = _gen_chat
+    pl.config["subagent_enabled"] = True
+    await pg._generate_and_store("2099-01-01")
+    assert "小鱼" in _seen.get("sub_block", ""), "记忆没传给子代理"
+    assert "小鱼" in _seen.get("gen_prompt", ""), "规划失败后回退的单次调用没带记忆"
+    _plan = await pg.get_kv_data("daily_plan_next", None)
+    assert _plan and _plan["date"] == "2099-01-01" and _plan["items"], _plan
+
+    async def _subagents_ok(date, times, time_list, count, persona, memory_block):
+        return [{"time": "07:35", "text": "子代理写的"}]
+
+    pg._generate_with_subagents = _subagents_ok
+    _seen.pop("gen_prompt", None)
+    await pg._generate_and_store("2099-01-02")
+    assert "gen_prompt" not in _seen, "子代理成功却又走了单次调用"
+
+    class _Ev:
+        def plain_result(self, text):
+            return text
+
+    # 18e) /记忆 与 /刷新记忆
+    _got = [r async for r in pg.memory_command(_Ev())]
+    assert "🧠 记忆库" in _got[0] and "小鱼" in _got[0], _got
+    pl.config["memory_enabled"] = False
+    _got2 = [r async for r in pg.memory_command(_Ev())]
+    assert "memory_enabled = false" in _got2[0], _got2
+    _got3 = [r async for r in pg.refresh_memory_command(_Ev())]
+    assert "memory_enabled" in _got3[0], _got3
+    assert await pg.refresh_memory() == "", "关闭记忆后不应写入"
+    pl.config["memory_enabled"] = True
+    # 18f) _truncate_memory 上限
+    _long = "\n".join(f"第{i}行的记忆内容" for i in range(400))
+    _cut = pg._truncate_memory(_long)
+    assert len(_cut) < len(_long), (len(_cut), len(_long))
+    print("[18] 记忆库 + 子代理流水线（含回退单次生成）OK")
+
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
     print("[16] terminate() 完成，门禁已卸载")

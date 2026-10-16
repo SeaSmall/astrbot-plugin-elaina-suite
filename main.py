@@ -224,6 +224,65 @@ GUARD_DEFAULT_PROMPT = """你是{persona}
 4. 不要输出 JSON 以外的任何文字
 时间点：{time_list}"""
 
+# ---- 记忆库 / 子代理流水线（与独立版 proactive-guard v1.1.0 逐行等价）----
+PLANNER_PROMPT = """{persona}
+今天是{date}。请为下面 {count} 个时间点各规划**一句话要点**，说明那一刻适合跟用户聊什么。
+{memory_block}
+要求：
+1. 要点要贴合时间点场景（早晨问候、上午加油、中午提醒休息吃饭、下午闲聊、傍晚关心、晚上问候、睡前道晚安等）
+2. 若有「近期对话记忆」，优先沿着记忆里聊过的话题自然延伸（比如上次提到在加班、在准备考试、养了猫），不要凭空寒暄
+3. 各时间点要点之间不要重复，一天下来像一条自然流动的线
+4. 只输出一个 JSON 数组：[{{"time": "07:35", "point": "要点"}}, ...]
+5. 不要输出 JSON 以外的任何文字
+时间点：{time_list}"""
+
+WRITER_PROMPT = """{persona}
+今天是{date}，现在是{time}。请给用户写一条 20~60 字的简短消息。
+{memory_block}
+本次要写的内容要点：{point}
+
+要求：
+1. 贴合 {time} 这个时间点的场景，像真人朋友随手发的一条，自然口语化
+2. 若有「近期对话记忆」，可以自然地延续其中的话题或情绪，但不要生硬复述
+3. 只输出这条消息的正文，不要输出引号、不要输出时间、不要任何解释说明"""
+
+REVIEWER_PROMPT = """{persona}
+下面是一天里要发给用户的一批消息草稿（JSON 数组），请你审校后输出最终版本。
+
+审校要求：
+1. 语气统一、自然，像一个真实的人在同一天里陆续发的，不要每条都像模板
+2. 去掉重复、雷同、空泛的内容；同一件事不要反复提
+3. 修掉与时间点场景不符的内容（如早晨发「晚安」）
+4. 每条保持 20~60 字，不要加时间前缀，不要加编号
+5. 条数、时间点必须与输入**完全一致**，不要增删
+6. 只输出一个 JSON 数组：[{{"time": "07:35", "text": "消息内容"}}, ...]，不要输出 JSON 以外的任何文字
+
+草稿：
+{draft}"""
+
+MEMORY_BLOCK_TEMPLATE = """
+近期对话记忆（用户与你的真实聊天片段，按时间从早到晚）：
+{memory}
+（以上只是背景，不要直接复述、不要提及「记忆」「记录」这类词）"""
+
+MEMORY_KEY = "memory_store"
+
+MEMORY_PROMPT = """你是一个记忆整理助手。请阅读下面的对话记录，提炼出关于这位用户的长期记忆要点。
+
+已有记忆（上一轮的总结，可能为空）：
+{old}
+
+新的对话记录（从早到晚）：
+{raw}
+
+要求：
+1. 输出一份**更新后**的记忆，把旧记忆与新对话合并：保留旧记忆里仍然有效的部分，加入新出现的信息
+2. 只记「以后聊天用得上」的长期信息：称呼/昵称、身份与职业、正在做的事（项目、考试、行程）、
+   长期偏好与习惯（口味、作息、喜欢的表达方式）、情绪状态、重要的人际关系、明确提过的约定
+3. **不要记**流水账（「用户问了一个问题」「AI 回答了」这类）、不要记一次性的琐事、不要编造没出现过的信息
+4. 用第三人称写「用户…」，短句分条，每行一条，最多 {max_chars} 字
+5. 只输出记忆正文，不要输出标题、不要解释你做了什么"""
+
 # ---------------------------------------------------------------------------
 # Elaina 表情包：默认配置（对齐原版 astrbot_plugin_Elaina_meme_Bridge）
 # ---------------------------------------------------------------------------
@@ -2490,6 +2549,31 @@ class ProactiveGuardCore(_PluginCoreBase):
                         persistent=False,
                     )
                 self._cron_job_ids.append(getattr(j2, "job_id", None))
+                if self._cfg_bool("memory_enabled", True):
+                    mem_cron = str(
+                        self.config.get("memory_cron") or "0 3 * * *"
+                    ).strip()
+                    try:
+                        j3 = await cm.add_basic_job(
+                            name="proactive_guard_memory",
+                            cron_expression=mem_cron,
+                            handler=self._on_memory_time,
+                            description="把近期对话总结进记忆库（后台静默）",
+                            enabled=True,
+                            persistent=False,
+                            timezone=tz,
+                        )
+                    except TypeError:
+                        j3 = await cm.add_basic_job(
+                            name="proactive_guard_memory",
+                            cron_expression=mem_cron,
+                            handler=self._on_memory_time,
+                            description="把近期对话总结进记忆库（后台静默）",
+                            enabled=True,
+                            persistent=False,
+                        )
+                    self._cron_job_ids.append(getattr(j3, "job_id", None))
+                    logger.info(f"[proactive_guard] 记忆总结任务已注册: {mem_cron}（时区 {tz}）")
                 logger.info(
                     f"[proactive_guard] 定时任务已注册（cron_manager）: 生成 {gen_cron} "
                     f"/ 分钟检查 * * * * *（时区 {tz}）"
@@ -2514,6 +2598,14 @@ class ProactiveGuardCore(_PluginCoreBase):
                 id="pg_min",
                 misfire_grace_time=30,
             )
+            if self._cfg_bool("memory_enabled", True):
+                mem_cron = str(self.config.get("memory_cron") or "0 3 * * *").strip()
+                self._fallback_sched.add_job(
+                    self._on_memory_time,
+                    CronTrigger.from_crontab(mem_cron, timezone=tz),
+                    id="pg_mem",
+                    misfire_grace_time=600,
+                )
             self._fallback_sched.start()
             logger.info(
                 f"[proactive_guard] 定时任务已注册（APScheduler）: 生成 {gen_cron} "
@@ -2606,13 +2698,43 @@ class ProactiveGuardCore(_PluginCoreBase):
         times = self._random_times(count)
         time_list = "、".join(times)
         persona = await self._resolve_persona()
-        prompt = (self.config.get("message_prompt") or GUARD_DEFAULT_PROMPT).replace(
-            "{date}", target_date
-        ).replace("{persona}", persona).replace(
-            "{time_list}", time_list
-        ).replace("{count}", str(count))
-        text = await self._llm_chat(prompt)
-        items = self._parse_items(text, times)
+
+        # ---- 记忆：从会话历史里捞近期真实对话 ----
+        memory = await self._collect_memory()
+        memory_block = ""
+        if memory:
+            memory_block = MEMORY_BLOCK_TEMPLATE.format(memory=memory)
+            logger.debug(
+                f"[proactive_guard] 已读取记忆 {len(memory)} 字，用于生成（{target_date}）"
+            )
+
+        subagent_on = self._cfg_bool("subagent_enabled", True)
+        items: list[dict] = []
+        if subagent_on:
+            items = await self._generate_with_subagents(
+                target_date, times, time_list, count, persona, memory_block
+            )
+        if not items:
+            # 兜底：单次调用（v1.0.x 行为）。子代理关闭、或规划代理失败/未产出要点时走这里，
+            # 保证「回退单次生成」这句日志名副其实（不再拿到空列表就直接报错）。
+            if subagent_on:
+                logger.warning(
+                    f"[proactive_guard] 子代理流水线未产出结果，回退单次生成（{target_date}）"
+                )
+            prompt = (self.config.get("message_prompt") or GUARD_DEFAULT_PROMPT).replace(
+                "{date}", target_date
+            ).replace("{persona}", persona).replace(
+                "{time_list}", time_list
+            ).replace("{count}", str(count))
+            if memory_block:
+                prompt = f"{prompt}\n{memory_block}"
+            try:
+                text = await self._llm_chat(prompt)
+                items = self._parse_items(text, times)
+            except Exception as e:
+                # 兜底也失败（例如 LLM 全挂）：只记日志，不把异常抛给调度器
+                logger.warning(f"[proactive_guard] 兜底单次生成失败（{target_date}）: {e}")
+                items = []
         if not items:
             logger.error(
                 f"[proactive_guard] 计划生成失败（{target_date}）：无法解析 LLM 输出，稍后重试"
@@ -2621,7 +2743,8 @@ class ProactiveGuardCore(_PluginCoreBase):
         await self.put_kv_data(slot, {"date": target_date, "items": items})
         logger.info(
             f"[proactive_guard] 计划已生成（{target_date}）：{len(items)} 条消息 "
-            f"@ {time_list}（后台静默）"
+            f"@ {time_list}（后台静默，记忆 {'有' if memory else '无'}，"
+            f"子代理 {'开' if subagent_on else '关'}）"
         )
 
     async def _resolve_persona(self) -> str:
@@ -2872,6 +2995,399 @@ class ProactiveGuardCore(_PluginCoreBase):
         except Exception:
             return {}
 
+    # ================================================================== #
+    # 记忆库（凌晨总结对话 -> 生成时注入 -> 发完回写历史）
+    # ================================================================== #
+
+    async def refresh_memory(self, umo: str | None = None) -> str:
+        """把近期对话交给 AI 总结，写入记忆库（KV）。
+
+        记忆库结构（KV key = MEMORY_KEY）：
+        {
+          "updated": "2026-10-15 03:00",
+          "items": [{"umo": "...", "summary": "...", "updated": "..."}]
+        }
+
+        与原始历史不同，这里存的是**AI 提炼过的要点**（称呼、正在做的事、
+        情绪状态、提过的偏好与约定），比整段对话更省 token、也更聚焦，
+        并且会滚动更新（每次把「旧摘要 + 新对话」一起交给 AI 重写）。
+        """
+        if not self._cfg_bool("memory_enabled", True):
+            return ""
+        try:
+            cm = getattr(self.context, "conversation_manager", None)
+            if cm is None or not hasattr(cm, "get_conversation"):
+                return ""
+            targets = [umo] if umo else await self._collect_target_sessions()
+            if not targets:
+                return ""
+            store = await self._load_memory_store()
+            items = {str(it.get("umo", "")): it for it in store.get("items", []) if it}
+            max_chars = max(200, self._cfg_int("memory_max_chars", 1500))
+            turns = max(2, self._cfg_int("memory_turns", 20))
+            for target in targets:
+                try:
+                    lines = await self._history_lines(cm, target, turns)
+                    if not lines:
+                        continue
+                    old = str(items.get(target, {}).get("summary", "")).strip()
+                    raw = "\n".join(lines)
+                    prompt = MEMORY_PROMPT.format(
+                        old=old or "（暂无）",
+                        raw=raw[-max_chars * 2 :],
+                        max_chars=max_chars,
+                    )
+                    summary = (await self._llm_chat(prompt)).strip()
+                    summary = self._clean_message(summary) if "\n" not in summary else summary
+                    if not summary:
+                        continue
+                    items[target] = {
+                        "umo": target,
+                        "summary": summary[:max_chars],
+                        "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    }
+                except Exception as e:
+                    logger.warning(f"[proactive_guard] 总结会话记忆失败（{target}）: {e}")
+            if not items:
+                return ""
+            store = {
+                "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "items": list(items.values()),
+            }
+            await self.put_kv_data(MEMORY_KEY, store)
+            logger.info(
+                f"[proactive_guard] 记忆已更新：{len(items)} 个会话"
+                f"（{', '.join(str(it.get('umo', '')) for it in items.values())}）"
+            )
+            return self._memory_text(store)
+        except Exception as e:
+            logger.warning(f"[proactive_guard] 刷新记忆失败: {e}")
+            return ""
+
+    async def _load_memory_store(self) -> dict:
+        try:
+            data = await self.get_kv_data(MEMORY_KEY, None)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                return data
+        except Exception:
+            pass
+        return {"items": []}
+    @staticmethod
+
+    def _memory_text(store: dict) -> str:
+        """把记忆库渲染成注入提示词的一段文本。"""
+        items = [it for it in (store or {}).get("items", []) if it.get("summary")]
+        if not items:
+            return ""
+        if len(items) == 1:
+            return str(items[0]["summary"]).strip()
+        lines: list[str] = []
+        for it in items:
+            umo = str(it.get("umo", ""))
+            lines.append(f"【{umo}】{str(it['summary']).strip()}")
+        return "\n".join(lines)
+
+    async def _collect_memory(self) -> str:
+        """取记忆文本：优先用 AI 总结过的记忆库；为空则实时总结一次；再不行退回原始历史。
+
+        三级降级是为了保证「第一次运行、还没到总结时间」时也有记忆可用。
+        """
+        if not self._cfg_bool("memory_enabled", True):
+            return ""
+        try:
+            store = await self._load_memory_store()
+            text = self._memory_text(store)
+            if text:
+                return self._truncate_memory(text)
+            # 记忆库还空着：立刻总结一次（首次生成计划时就地建库）
+            text = await self.refresh_memory()
+            if text:
+                return self._truncate_memory(text)
+        except Exception as e:
+            logger.debug(f"[proactive_guard] 读取记忆库失败，回退原始历史: {e}")
+        if not self._cfg_bool("memory_raw_fallback", True):
+            return ""
+        return self._truncate_memory(await self._collect_raw_history())
+
+    def _truncate_memory(self, text: str) -> str:
+        budget = max(200, self._cfg_int("memory_max_chars", 1500))
+        if len(text) <= budget:
+            return text
+        kept = text[-budget:]
+        nl = kept.find("\n")
+        if nl != -1:
+            kept = kept[nl + 1 :]
+        return kept
+
+    async def _collect_raw_history(self) -> str:
+        """兜底：未经总结的原始对话历史（短、杂，不如记忆库聚焦）。"""
+        turns = max(1, self._cfg_int("memory_turns", 20))
+        try:
+            cm = getattr(self.context, "conversation_manager", None)
+            if cm is None or not hasattr(cm, "get_conversation"):
+                return ""
+            targets = await self._collect_target_sessions()
+            if not targets:
+                return ""
+            merged: list[str] = []
+            for umo in targets[:5]:
+                lines = await self._history_lines(cm, umo, turns)
+                if len(lines) > len(merged):
+                    merged = lines
+            return "\n".join(merged)
+        except Exception as e:
+            logger.debug(f"[proactive_guard] 读取原始历史失败: {e}")
+            return ""
+
+    async def _history_lines(self, cm, umo: str, turns: int) -> list[str]:
+        """把单个会话的历史整理成 [「用户：…」/「你：…」] 行列表（只取最近 turns 条）。"""
+        try:
+            cid = await cm.get_curr_conversation_id(umo)
+            if not cid:
+                return []
+            conv = await cm.get_conversation(umo, cid)
+            raw = getattr(conv, "history", None) if conv is not None else None
+            if not raw:
+                return []
+            history = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(history, list):
+                return []
+            lines: list[str] = []
+            for msg in history:
+                if not isinstance(msg, dict):
+                    continue
+                role = str(msg.get("role", ""))
+                content = msg.get("content", "")
+                # content 可能是多模态数组，只取文本部分
+                if isinstance(content, list):
+                    parts = [
+                        str(p.get("text", ""))
+                        for p in content
+                        if isinstance(p, dict) and p.get("text")
+                    ]
+                    content = " ".join(parts)
+                content = str(content).strip().replace("\n", " ")
+                if not content:
+                    continue
+                if role == "user":
+                    lines.append(f"用户：{content}")
+                elif role == "assistant":
+                    lines.append(f"你：{content}")
+            return lines[-turns:] if len(lines) > turns else lines
+        except Exception as e:
+            logger.debug(f"[proactive_guard] 读取会话历史失败（{umo}）: {e}")
+            return []
+
+    # ------------------------------------------------------------------ #
+    # 子代理流水线：规划 -> 并行写手 -> 审校
+    # ------------------------------------------------------------------ #
+
+    async def _generate_with_subagents(
+        self,
+        target_date: str,
+        times: list[str],
+        time_list: str,
+        count: int,
+        persona: str,
+        memory_block: str,
+    ) -> list[dict]:
+        """用三个「子代理」协作产出一天的消息。
+
+        子代理在这里就是三次独立、职责单一、上下文各自收敛的 LLM 调用：
+        规划代理只出要点（不写正文），写手代理一次只写一条（上下文最小、
+        最不容易被别的时段带偏），审校代理统管全局语气与去重。
+        比单次「一把梭」更稳：某个时间点写砸了不会拖垮整天，而且每个写手
+        只看到自己那一条的记忆片段，不会串味。
+        """
+        # --- 1) 规划代理：每个时间点一句要点 ---
+        planner_prompt = PLANNER_PROMPT.format(
+            persona=persona,
+            date=target_date,
+            count=count,
+            time_list=time_list,
+            memory_block=memory_block,
+        )
+        try:
+            plan_text = await self._llm_chat(planner_prompt)
+            points = self._parse_points(plan_text, times)
+        except Exception as e:
+            logger.warning(f"[proactive_guard] 规划代理失败，回退单次生成: {e}")
+            return []
+        if not points:
+            logger.warning("[proactive_guard] 规划代理未产出可用要点，回退单次生成")
+            return []
+
+        # --- 2) 写手代理：每人只写自己那条，并行 ---
+        async def write_one(t: str, point: str) -> dict | None:
+            prompt = WRITER_PROMPT.format(
+                persona=persona,
+                date=target_date,
+                time=t,
+                point=point,
+                memory_block=memory_block,
+            )
+            try:
+                text_out = await self._llm_chat(prompt)
+            except Exception as e:
+                logger.warning(f"[proactive_guard] 写手代理失败（{t}）: {e}")
+                return None
+            text_out = self._clean_message(text_out)
+            if not text_out:
+                logger.debug(f"[proactive_guard] 写手代理返回空内容（{t}）")
+                return None
+            return {"time": t, "text": text_out}
+
+        concurrency = max(1, min(self._cfg_int("subagent_concurrency", 3), len(points)))
+        if not self._cfg_bool("subagent_parallel", True):
+            concurrency = 1
+        sem = asyncio.Semaphore(concurrency)
+
+        async def limited(t: str, point: str) -> dict | None:
+            async with sem:
+                return await write_one(t, point)
+
+        results = await asyncio.gather(
+            *(limited(t, p) for t, p in points), return_exceptions=True
+        )
+        drafts: list[dict] = []
+        for r in results:
+            if isinstance(r, dict) and r.get("text"):
+                drafts.append(r)
+        if not drafts:
+            logger.warning("[proactive_guard] 写手代理全部失败，回退单次生成")
+            return []
+
+        # --- 3) 审校代理：统一语气、去重、修场景错位 ---
+        if self._cfg_bool("subagent_review", True) and len(drafts) > 0:
+            reviewed = await self._review_drafts(drafts, persona)
+            if reviewed:
+                drafts = reviewed
+
+        drafts.sort(key=lambda x: x.get("time", ""))
+        return drafts
+
+    async def _review_drafts(self, drafts: list[dict], persona: str) -> list[dict]:
+        """审校代理：只允许它改文案，条数与时间点以输入为准（防止被 AI 增删）。"""
+        if not drafts:
+            return []
+        times = [d["time"] for d in drafts]
+        prompt = REVIEWER_PROMPT.format(
+            persona=persona,
+            draft=json.dumps(drafts, ensure_ascii=False),
+        )
+        try:
+            text = await self._llm_chat(prompt)
+        except Exception as e:
+            logger.warning(f"[proactive_guard] 审校代理失败，使用写手原稿: {e}")
+            return []
+        if not isinstance(text, str) or not text.strip():
+            logger.warning("[proactive_guard] 审校代理返回空内容，使用写手原稿")
+            return []
+        items = self._parse_items(text, times)
+        if len(items) != len(times):
+            logger.warning(
+                f"[proactive_guard] 审校代理输出条数不符（{len(items)}/{len(times)}），使用写手原稿"
+            )
+            return []
+        return items
+
+    def _parse_points(self, text: str, expected_times: list[str]) -> list[tuple[str, str]]:
+        """解析规划代理的 [{time, point}]。字段兼容 point/plan/topic/text。"""
+        out: list[tuple[str, str]] = []
+        if not isinstance(text, str) or not text.strip():
+            text = ""
+        m = re.search(r"\[.*\]", text, re.S)
+        if m:
+            try:
+                arr = json.loads(m.group(0))
+            except Exception:
+                arr = None
+            if isinstance(arr, list):
+                for obj in arr:
+                    if not isinstance(obj, dict):
+                        continue
+                    t = self._normalize_time(str(obj.get("time", "")).strip())
+                    point = str(
+                        obj.get("point")
+                        or obj.get("plan")
+                        or obj.get("topic")
+                        or obj.get("text")
+                        or ""
+                    ).strip()
+                    if t in expected_times and point:
+                        out.append((t, point))
+        if not out:
+            # 行解析：HH:MM 要点
+            for line in text.splitlines():
+                line = re.sub(r"^(?:\d+\s*[.、)）\-]\s*)+", "", line.strip())
+                m2 = re.match(
+                    r"^(\d{1,2}:\d{2})\s*[:|\-]?\s*(.+)$", line
+                )
+                if m2:
+                    t = self._normalize_time(m2.group(1))
+                    point = m2.group(2).strip()
+                    if t in expected_times and point:
+                        out.append((t, point))
+        # 去重 + 按输入时间顺序对齐（缺失的时间点用通用要点补齐，避免整天少几条）
+        seen: dict[str, str] = {}
+        for t, p in out:
+            if t not in seen:
+                seen[t] = p
+        return [(t, seen.get(t, "自然地聊一句，贴合这个时间的场景")) for t in expected_times]
+    @staticmethod
+
+    def _clean_message(text: str) -> str:
+        """清掉写手代理可能多输出的包装：引号、时间前缀、编号、解释。"""
+        if not isinstance(text, str):
+            return ""
+        t = text.strip()
+        if not t:
+            return ""
+        # 去掉整体包裹的引号
+        t = t.strip().strip('"').strip("“”").strip("「」").strip("'").strip()
+        # 去掉行首时间前缀："07:35 早上好" / "07:35：早上好"
+        t = re.sub(r"^\d{1,2}:\d{2}\s*[:：\-|]?\s*", "", t)
+        # 去掉行首编号
+        t = re.sub(r"^(?:\d+\s*[.、)）\-]\s*)+", "", t)
+        # 只保留第一行有效内容
+        for line in t.splitlines():
+            line = line.strip()
+            if line:
+                return line.strip()
+        return ""
+
+    async def _on_memory_time(self) -> None:
+        """到记忆总结时间：把近期对话交给 AI 总结，写进记忆库（后台静默）。"""
+        try:
+            await self.refresh_memory()
+        except Exception as e:
+            logger.error(f"[proactive_guard] 记忆总结失败: {e}", exc_info=True)
+
+    async def memory_command(self, event: AstrMessageEvent):
+        """查看当前记忆库内容"""
+        store = await self._load_memory_store()
+        items = [it for it in store.get("items", []) if it]
+        lines: list[str] = ["🧠 记忆库"]
+        if not items:
+            lines.append("（还没有记忆。到 memory_cron 时间会自动总结，或现在用 /刷新记忆 立刻生成）")
+        else:
+            lines.append(f"最后更新：{store.get('updated', '未知')}")
+            for it in items:
+                lines.append("")
+                lines.append(f"【{it.get('umo', '')}】{it.get('updated', '')}")
+                lines.append(str(it.get("summary", "")).strip())
+        if not self._cfg_bool("memory_enabled", True):
+            lines.append("")
+            lines.append("⚠️ 记忆功能当前已关闭（memory_enabled = false）")
+        yield event.plain_result("\n".join(lines))
+
+    async def refresh_memory_command(self, event: AstrMessageEvent):
+        """立刻让 AI 总结一次对话，写入记忆库"""
+        if not self._cfg_bool("memory_enabled", True):
+            yield event.plain_result("⚠️ 记忆功能已关闭，请先在配置里打开 memory_enabled。")
+            return
+        yield event.plain_result("⏳ 正在总结记忆…")
+        asyncio.create_task(self.refresh_memory())
     # ================================================================== #
     # 指令（用户主动触发时才回复）
     # ================================================================== #
@@ -4242,6 +4758,18 @@ class ElainaSuitePlugin(Star):
     async def rebuild_plan_command(self, event: AstrMessageEvent):
         """立即在后台重新生成明天的计划。"""
         async for result in self.proactive_guard.rebuild_plan_command(event):
+            yield result
+
+    @filter.command("记忆")
+    async def memory_command(self, event: AstrMessageEvent):
+        """查看当前记忆库内容。"""
+        async for result in self.proactive_guard.memory_command(event):
+            yield result
+
+    @filter.command("刷新记忆")
+    async def refresh_memory_command(self, event: AstrMessageEvent):
+        """立刻让 AI 总结一次对话，写入记忆库。"""
+        async for result in self.proactive_guard.refresh_memory_command(event):
             yield result
 
     @filter.command("health", alias={"健康报告"})
