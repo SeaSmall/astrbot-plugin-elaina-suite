@@ -170,12 +170,17 @@
   "digest_send_mode": {
     "type": "string",
     "default": "auto",
-    "description": "【每日简报】简报发送方式：text=纯文本分条发送；image=渲染为图片发送；file=保存为 .md 文件发送（需平台支持本地文件）；auto=短文本直接发，超过阈值自动转图片（失败回退 md 文件/文本）"
+    "description": "【每日简报】简报发送方式：text=纯文本分条发送；image=渲染为图片发送；file=保存为 .md 文件发送（需平台支持本地文件）；both=同时发送图片 + .md 文件（推荐，图片便于手机看、md 便于存档检索）；auto=短文本直接发，超过阈值按 both 发送（失败均回退文本）"
   },
   "digest_long_threshold": {
     "type": "int",
     "default": 2000,
     "description": "【每日简报】auto 模式下触发「转图片/文件」的简报长度阈值（字符数）"
+  },
+  "digest_also_send_md": {
+    "type": "bool",
+    "default": true,
+    "description": "【每日简报】发送图片时是否**同时**补发一份 .md 文件（图片便于手机阅读，md 文件便于保存/检索/二次加工，两者互补；关闭则只发图片）"
   },
   "digest_target_sessions": {
     "type": "text",
@@ -204,8 +209,13 @@
   },
   "feeds_policy": {
     "type": "text",
-    "default": "cctv:news\nbaidu:hot",
-    "description": "【每日简报】政策前沿源（每行一个：RSS URL，或 cctv:频道 / baidu:hot）"
+    "default": "gov:zuixin\nndrc:xwfb\ngov:yaowen",
+    "description": "【每日简报】政策前沿源（每行一个：RSS URL，或 gov:zuixin=中国政府网最新政策 / gov:yaowen=中国政府网要闻 / ndrc:xwfb=国家发改委新闻发布 / cctv:频道 / baidu:hot）。默认接政府官方网站，取代原来的央视要闻 + 百度热搜"
+  },
+  "gov_policy_recent_days": {
+    "type": "int",
+    "default": 30,
+    "description": "【每日简报】政策前沿的时效窗口（天）。政府官网政策文件发布频率低（可能数日才有一条），硬卡「昨日」会让板块经常空白，因此放宽为「最近 N 天」；窗口内无新政策时退回最新几条，避免整块消失"
   },
   "llm_prompt": {
     "type": "text",

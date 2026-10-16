@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import inspect
+import json
 import os
 import sys
 import tempfile
@@ -24,6 +25,13 @@ assert mod.GUARD_DEFAULT_PROMPT and "{persona}" in mod.GUARD_DEFAULT_PROMPT
 assert mod.DEFAULT_PROMPT_TEMPLATE and "{image_content}" in mod.DEFAULT_PROMPT_TEMPLATE
 assert mod.DEFAULT_MEME_PROBABILITY == 0.5
 assert mod.MEME_EXTENSIONS == (".gif", ".jpg", ".jpeg", ".png", ".webp")
+assert mod.GOV_SOURCES == ("gov:zuixin", "gov:yaowen", "ndrc:xwfb"), mod.GOV_SOURCES
+assert "Referer" in mod.GOV_HEADERS
+assert mod.DEFAULT_FEEDS["feeds_policy"] == ["gov:zuixin", "ndrc:xwfb", "gov:yaowen"]
+# 划线净化：只剥标记、保留文字
+assert mod._sanitize_for_image("~~删除线~~内容") == "删除线内容"
+assert mod._sanitize_for_image("**粗体**与_斜体_") == "粗体与斜体"
+assert mod._sanitize_for_image("") == ""
 assert mod.GUARD_HARD_MARKERS and "content_filter" in mod.GUARD_HARD_MARKERS
 assert mod._guard_as_bool("true", False) is True and mod._guard_as_bool("0", True) is False
 assert mod._guard_as_int("60") == 60 and mod._guard_as_int("x", 5) == 5
@@ -402,6 +410,131 @@ async def main():
     finally:
         mod.httpx = orig_httpx
     print("[15] MiMo 2.6 默认 + 模型名自动降级 OK")
+
+    # 17) 日报：政府官网政策源 + 图片/文件「两份都给」发送链路
+    dd = pl.daily_digest
+    # 17a) token 识别与默认源
+    assert dd._is_json_source("gov:zuixin") is True
+    assert dd._is_json_source("gov:yaowen") is True
+    assert dd._is_json_source("ndrc:xwfb") is True
+    assert dd._is_json_source("cctv:news") is True
+    assert dd._is_json_source("https://example.com/feed.xml") is False
+    assert dd._feed_urls("feeds_policy") == ["gov:zuixin", "ndrc:xwfb", "gov:yaowen"]
+    # 17b) _fetch_gov_source 解析（走 httpx/urllib 桩，覆盖三种 JSON/HTML 结构）
+    import urllib.request as _ureq
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._d = data
+
+        def read(self):
+            return self._d
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    orig_urlopen = _ureq.urlopen
+    fed = {}
+
+    def _fake_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        fed[url] = req.headers
+        if "ZUIXINZHENGCE.json" in url:
+            body = json.dumps(
+                [{"TITLE": "中共中央 国务院关于发展新质生产力的意见",
+                  "SUB_TITLE": "附件",
+                  "URL": "https://www.gov.cn/zhengce/202610/content_7082820.htm",
+                  "DOCRELPUBTIME": "2099-01-01"}],
+                ensure_ascii=False,
+            )
+            return _FakeResp(body.encode("utf-8"))
+        if "pushinfo.json" in url:
+            body = json.dumps(
+                [{"title": "国务院召开常务会议",
+                  "link": "https://www.gov.cn/yaowen/liebiao/x.htm",
+                  "pubDate": "2099-01-01", "description": "摘要"}],
+                ensure_ascii=False,
+            )
+            return _FakeResp(body.encode("utf-8"))
+        html = (
+            '<ul><li><a href="./202610/t20261015_1.html" target="_blank" '
+            'title="成品油价格不作调整">x</a><span>2099/01/01</span></li></ul>'
+        )
+        return _FakeResp(html.encode("utf-8"))
+
+    _ureq.urlopen = _fake_urlopen
+    try:
+        zx = await dd._fetch_gov_source("gov:zuixin", 5)
+        assert zx and zx[0]["link"].endswith("content_7082820.htm"), zx
+        assert zx[0]["source"] == "中国政府网", zx
+        assert "gov.cn" in zx[0]["link"]
+        yw = await dd._fetch_gov_source("gov:yaowen", 5)
+        assert yw and yw[0]["title"], yw
+        nd = await dd._fetch_gov_source("ndrc:xwfb", 5)
+        assert nd and nd[0]["link"].startswith("https://www.ndrc.gov.cn/"), nd
+        # 请求带上了 gov Referer
+        assert any("Referer" in str(v) for v in fed.values()), fed.keys()
+    finally:
+        _ureq.urlopen = orig_urlopen
+    # 17c) 政策板块放宽时效窗口；普通板块仍严格
+    from datetime import datetime as _dt, timedelta as _td
+    now = _dt.now().astimezone()
+    old_item = {"title": "20天前的政策", "link": "x", "pub_date": now - _td(days=20), "summary": ""}
+    new_item = {"title": "今天的新闻", "link": "y", "pub_date": now, "summary": ""}
+    assert dd._filter_yesterday([old_item], 30) == [old_item]
+    assert dd._filter_yesterday([old_item], 0) == []
+    assert dd._filter_yesterday([new_item], 0) == [new_item]
+    # 17d) 发送模式分流：auto 长文本 -> 同时发图片与 md
+    calls = {"image": 0, "md": 0, "text": 0}
+
+    async def _fake_image(text, targets):
+        calls["image"] += 1
+        return True
+
+    async def _fake_md(text, targets):
+        calls["md"] += 1
+        return True
+
+    async def _fake_text(umo, text):
+        calls["text"] += 1
+
+    dd._send_image = _fake_image
+    dd._send_md = _fake_md
+    dd._send_text = _fake_text
+    pl.config["digest_send_mode"] = "auto"
+    pl.config["digest_long_threshold"] = 10
+    pl.config["digest_also_send_md"] = True
+    await dd._send_digest("x" * 100, ["aiocqhttp:Friend:1"])
+    assert calls == {"image": 1, "md": 1, "text": 0}, calls
+    # text 模式：都发文本
+    calls.update(image=0, md=0, text=0)
+    pl.config["digest_send_mode"] = "text"
+    await dd._send_digest("x" * 100, ["aiocqhttp:Friend:1"])
+    assert calls == {"image": 0, "md": 0, "text": 1}, calls
+    # both 模式：图片与 md 都发
+    calls.update(image=0, md=0, text=0)
+    pl.config["digest_send_mode"] = "both"
+    await dd._send_digest("x", ["aiocqhttp:Friend:1"])
+    assert calls == {"image": 1, "md": 1, "text": 0}, calls
+    # 两者都失败 -> 回退纯文本
+    calls.update(image=0, md=0, text=0)
+
+    async def _fail_image(text, targets):
+        calls["image"] += 1
+        return False
+
+    async def _fail_md(text, targets):
+        calls["md"] += 1
+        return False
+
+    dd._send_image = _fail_image
+    dd._send_md = _fail_md
+    await dd._send_digest("x", ["aiocqhttp:Friend:1"])
+    assert calls == {"image": 1, "md": 1, "text": 1}, calls
+    print("[17] 日报政府官网政策源 + 图片/md 两份都给 OK")
 
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"

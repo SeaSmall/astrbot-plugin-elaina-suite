@@ -26,7 +26,7 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 > [标准按量计费 API](https://platform.xiaomimimo.com/) 的 Key（`xiaomi_base_url` 相应改为 `https://api.xiaomimimo.com/v1` 之类，
 > 以控制台显示为准），或把识图交给百度/OCR.space 那两级。
 
-**2. 每日简报**：天气支持**多城市**（默认上海）且内置防高并发（结果缓存 / 地理编码缓存 7 天 / 城市单飞锁 / 请求节流 / 失败隔离）；新闻源为**实时免费源**（央视 JSONP、腾讯热榜、百度热搜、中国日报、WHO、Nature Medicine）；GitHub 日升榜 6 路降级（GitHub Search → gh-proxy 镜像 → 全站热门 → OSS Insight → gitterapp）；AI 总结被内容安全拦截时自动精简重试 → 模板兜底；到点未发会每 5 分钟补发（直到 `send_deadline`）；长简报可发图片 / md 文件。
+**2. 每日简报**：天气支持**多城市**（默认上海）且内置防高并发（结果缓存 / 地理编码缓存 7 天 / 城市单飞锁 / 请求节流 / 失败隔离）；新闻源为**实时免费源**（央视 JSONP、腾讯热榜、百度热搜、中国日报、WHO、Nature Medicine）；**「政策前沿」直接接政府官方网站**（中国政府网最新政策 / 中国政府网要闻 / 国家发改委新闻发布），不再用新闻热榜凑数，且因为政策不是每天都有，该板块时效放宽为「最近 N 天」（`gov_policy_recent_days`，默认 30 天），窗口内无新政策则退回最新几条；GitHub 日升榜 6 路降级（GitHub Search → gh-proxy 镜像 → 全站热门 → OSS Insight → gitterapp）；AI 总结被内容安全拦截时自动精简重试 → 模板兜底；到点未发会每 5 分钟补发（直到 `send_deadline`）；长简报**图片与 .md 文件两份都给**（`digest_send_mode=both`），图片便于手机阅读、md 便于存档检索。
 
 **3. 主动消息门禁 + 人格消息**：拦截「非本插件的 AI 主动发言」（用户没说话时一律不发）；每天后台预生成**明天**的 5-10 条人格消息，随机时间点，到点发送并删除；每日 06:00 重新生成，日复一日。
 
@@ -76,10 +76,10 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 82 项，按前缀分组：
+配置面板里共 84 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
-- **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_target_sessions` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_medical` / `feeds_policy` / `llm_prompt`
+- **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_medical` / `feeds_policy` / `llm_prompt`
 - **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
@@ -94,6 +94,14 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - QQ 官方平台媒体上传偶发失败时，插件会校验图片魔数/大小并带 `send_timeout` 超时，不会卡死（详见更新日志）。
 **Q：日报里出现 `high risk` 之类的报错文案？**
 - 那是服务商内容安全拦截，本插件的第 5 个功能（LLM 拦截兜底）会自动挡掉；日报侧还有「精简重试 + 模板兜底」双保险。
+**Q：政策前沿为什么不是「昨日」的？**
+- 政府官网的政策文件**不是每天都有**（可能数日才发一条），硬卡「昨日」会让整个板块长期空白。因此该板块单独放宽为「最近 `gov_policy_recent_days` 天」（默认 30 天）；窗口内确实没有新政策时，会退回最新几条并在日志里说明（`近 30 天无新政策，退回最新 N 条`）。其余板块仍严格卡「昨日」。
+**Q：图片上的文字被划掉了（有横线穿过）？**
+- 那是 AstrBot 文本转图渲染器对内联 Markdown 的处理问题：本地 PIL 渲染器把 `__文字__` 同时当成粗体和下划线（两条正则完全相同、未做重叠去重），并且会把 `~~文字~~` 真的画成删除线；网络渲染路径的 `marked.js` 也会把 `~~` 渲染成 `<del>`。
+- 本插件在送渲染前会用 `_sanitize_for_image()` **剥掉 `~~` / `__` / `**` / `*` / `_` 这些标记（保留文字本身）**，日报是资讯文本不需要这些修饰，所以正常情况下不会再有划线。
+**Q：简报太长被截断 / 漏板块？**
+- 到点推送时按 `digest_send_mode` 发送：默认 `auto`（超过 `digest_long_threshold` 就**图片 + .md 两份都给**）；
+- 两条消息平台的媒体上传可能各重试约 90 秒，插件对单个目标加了超时；**图片与 md 都失败**才会回退纯文本（会分块发送，`limit=3800` 字符/条）。
 **Q：系统健康报告没发？**
 - 多半是没装 psutil（日志有提示）；`pip install psutil` 后重载插件即可。
 

@@ -118,3 +118,70 @@
 - `.gitattributes`：新增 `meme/*.gif|jpg|jpeg|png|webp binary`，避免素材被当成文本做换行符转换。
 - README / metadata.yaml 同步更新（配置项清单、钩子清单、FAQ、素材版权声明：
   50 个表情包来自 B 站「白之魔女-霜娜」，仅供个人学习、禁止商用）。
+
+## v1.1.0（2026-10-16）
+
+本次把 `astrbot-plugin-daily-digest` v1.2.0 的日报改造同步进本合并插件，
+保持「合并后功能与原插件逐行等价」。
+
+### ✨ 政策前沿改接政府官方网站
+
+- **背景**：原来的「政策前沿」用的是 `cctv:news`（央视要闻）+ `baidu:hot`（百度热搜），
+  本质是新闻热榜，出现的内容经常与「政策文件」无关。
+- **新增三个政府官网源**（默认全部启用）：
+  - `gov:zuixin` —— 中国政府网「最新政策」`ZUIXINZHENGCE.json`（含中共中央/国务院最新政策文件）；
+  - `ndrc:xwfb` —— 国家发改委「新闻发布」列表页；
+  - `gov:yaowen` —— 中国政府网「要闻」`pushinfo.json`。
+  > gov.cn 的政策栏目页面本身是 JS 空壳（条目由同目录 JSON 异步填充），
+  > 所以直接抓 JSON，比解析 HTML 更稳也更快。
+- **默认源变更**：`feeds_policy` 默认值由 `cctv:news\nbaidu:hot` 改为
+  `gov:zuixin\nndrc:xwfb\ngov:yaowen`；`cctv:` / `baidu:hot` 语法仍然可用。
+- **放宽时效窗口**：政策文件发布频率低（可能数日才有一条），硬卡「昨日」会让整个板块
+  长期空白。新增配置项 `gov_policy_recent_days`（默认 30），政策板块按「最近 N 天」过滤；
+  窗口内确实没有新政策时退回最新几条并记日志。其余板块仍严格卡「昨日」。
+- 请求带上 `Referer: https://www.gov.cn/` 与 JSON Accept 头（`GOV_HEADERS`），
+  避免被站点策略拦下；`_http_get_bytes` 相应增加 `headers` 形参。
+
+### ✨ 图片与 .md 文件「两份都给」
+
+- **背景**：原实现是「**二选一**」——图片发成功就 `return`，不再发 md；图片失败才回退 md。
+  但图片便于手机阅读、md 便于保存/检索/二次加工，两者其实互补。
+- **发送方式重做**：拆成 `_send_image()` 与 `_send_md()` 两个独立方法，
+  `digest_send_mode` 扩为 `text` / `image` / `file` / `both` / `auto` 五档：
+  - `both` 同时发图片与 md；`auto` 超过 `digest_long_threshold` 时按 `both` 处理；
+  - 新增 `digest_also_send_md`（默认开）：只要发送方式包含图片，就**同时**补发一份 md；
+  - **两者都失败**才回退纯文本（原来任一成功就结束）。
+- 保留了原有的 90 秒单目标超时与「全目标失败回退」，避免媒体上传卡死导致日报整体丢失。
+
+### 🐛 修复：渲染图片上出现「划去线」
+
+- **根因**（AstrBot 两个渲染路径都会出错）：
+  1. 本地 PIL 渲染器 `astrbot/core/utils/t2i/local_strategy.py` 的行内样式表里，
+     `__(.*?)__` 被**同时**注册为 `BoldTextElement` 与 `UnderlineTextElement`
+     （两条正则完全相同），匹配结果未做重叠去重 → 同一段文字被画两遍、多出一条线；
+     且 `~~x~~` 会真的在文字中间画一条删除线。
+  2. 网络渲染路径（`template/base.html` + `marked.js`）会把 `~~x~~` 渲染成 `<del>` 删除线。
+- **修复**：新增 `_sanitize_for_image()`，在送 `text_to_image` 之前剥掉
+  `~~` / `__` / `**` / `*` / `_` 这些内联标记（**只去标记、保留文字**）。
+  日报是资讯文本，不需要删除线/下划线/斜体这些修饰。
+
+### 🧪 测试
+
+- `tests/test_merged.py` 新增第 **[17]** 组（并用第 [0] 组补充常量断言）：
+  - 常量：`GOV_SOURCES` / `GOV_HEADERS` / `DEFAULT_FEEDS["feeds_policy"]` / `_sanitize_for_image`（含「只剥标记保留文字」断言）；
+  - 源识别：`_is_json_source` 对三个 gov token 与 `cctv:news` 为真、对普通 RSS URL 为假；
+  - `_fetch_gov_source` 三种解析（gov.cn JSON 的 `TITLE/URL/DOCRELPUBTIME`、pushinfo 的
+    `title/link/pubDate`、发改委 HTML 的 `li/a/span`）与相对链接补全、Referer 下发；
+  - 时效：`_filter_yesterday(items, 30)` 保留 20 天前条目，`(items, 0)` 丢弃；
+  - 发送分流：`auto`(长文本) / `both` / `text` / 图片与 md 双失败回退文本，用方法替换统计调用次数。
+- 全部 **19 组冒烟测试通过**（`ALL SMOKE TESTS PASSED`）。
+- 联网实测（真实政府官网）：`gov:zuixin` 返回 10 条、`gov:yaowen` 10 条、`ndrc:xwfb` 9 条；
+  `_fetch_category("feeds_policy", 5)` 端到端产出 5 条真实政策条目
+  （如「2026年10月15日国内成品油价格不作调整」`https://www.ndrc.gov.cn/xwdt/xwfb/202610/t20261015_1408170.html`）。
+
+### 🔧 其它
+
+- `_send_long()` 被 `_send_image()` / `_send_md()` 取代，不再保留（避免两套发送逻辑并存）。
+- `_conf_schema.json`：82 → **84** 项（新增 `digest_also_send_md`、`gov_policy_recent_days`，
+  `feeds_policy` 默认值与描述更新，`digest_send_mode` 描述补 `both` 档）。
+- README 同步更新（日报特性段、配置项清单与数量、政策/划线/截断三条 FAQ）；metadata 版本 → 1.1.0。
