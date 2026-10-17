@@ -269,7 +269,8 @@ MEMORY_BLOCK_TEMPLATE = """
 
 MEMORY_KEY = "memory_store"
 
-MEMORY_PROMPT = """你是一个记忆整理助手。请阅读下面的对话记录，提炼出关于这位用户的长期记忆要点。
+MEMORY_PROMPT = """你是一个记忆整理助手。你的任务是把对话里**关于这位用户这个人**的信息记下来，
+写成一份随时能查的个人档案。
 
 已有记忆（上一轮的总结，可能为空）：
 {old}
@@ -277,13 +278,44 @@ MEMORY_PROMPT = """你是一个记忆整理助手。请阅读下面的对话记�
 新的对话记录（从早到晚）：
 {raw}
 
-要求：
-1. 输出一份**更新后**的记忆，把旧记忆与新对话合并：保留旧记忆里仍然有效的部分，加入新出现的信息
-2. 只记「以后聊天用得上」的长期信息：称呼/昵称、身份与职业、正在做的事（项目、考试、行程）、
-   长期偏好与习惯（口味、作息、喜欢的表达方式）、情绪状态、重要的人际关系、明确提过的约定
-3. **不要记**流水账（「用户问了一个问题」「AI 回答了」这类）、不要记一次性的琐事、不要编造没出现过的信息
-4. 用第三人称写「用户…」，短句分条，每行一条，最多 {max_chars} 字
-5. 只输出记忆正文，不要输出标题、不要解释你做了什么"""
+要记什么（这是重点）：
+1. **发生过的事**：用户做过什么、遇到什么、去了哪、事情进展到哪一步
+2. **爱好与偏好**：喜欢/讨厌什么、口味、习惯、作息、喜欢的表达方式与称呼
+3. **正在做的事**：项目、学业、考试、工作、行程、长期目标，以及各自的进度
+4. **人际关系**：家人、朋友、同学、同事，用户怎么称呼他们、关系如何、发生过什么
+5. **情绪与状态**：最近的心情、身体状态、压力来源
+6. **明确约定**：用户和你说好要做的事、提过的计划
+
+不要记什么：
+- **不要写任何关于你自己（助手）的描述**：你的自称、口头禅、语气、性格、你做过什么、你承诺过什么。
+  你的行为风格由人格设定负责，写进记忆只会和人格设定重复、互相打架
+- 不要记「用户问了你一个问题」「你回答了」这类流水账
+- 不要把「用户这一次让你做什么」当成长期事实（一次性指令不是档案）
+- 不要记一次性琐事；有日期的事可以记但要带日期，超过 7 天的旧安排不再保留
+- 不要编造对话里没出现过的信息
+
+写法：
+- 第三人称，主语是「用户…」，短句分条，每行一条
+- **同一件事只写一次**；旧记忆与新对话重复的合并成一条，不要两处都留
+- 新旧信息冲突时以新的为准
+- 整份档案不超过 {max_chars} 字；超了先删最不重要、最可能过期的条目
+- 只输出记忆正文，不要标题、不要编号、不要解释你做了什么"""
+
+MEMORY_MERGE_PROMPT = """下面是同一个用户在不同会话里留下的记忆摘要，内容有重复，也可能互相矛盾。
+请把它们合并成**一份**去重后的个人档案。
+
+{items}
+
+合并要求：
+1. 只保留关于**用户这个人**的信息：发生过的事、爱好与偏好、正在做的事、人际关系、情绪状态、明确约定
+2. **删掉所有关于助手（你）自己的描述**：自称、语气、性格、做过什么、承诺过什么——这些由人格设定负责
+3. 同一件事只留一条；不同会话说法冲突时，保留更新、更具体的那条
+4. 有日期的安排保留日期，超过 7 天的旧安排删掉
+5. 第三人称「用户…」，短句分条，每行一条，不超过 {max_chars} 字
+6. 只输出记忆正文，不要标题、不要解释"""
+
+# 记忆里出现这些开头的行 = 在描述助手自己，注入前直接丢掉（兜底，防止模型不听话）
+_MEMORY_SELF_SUBJECTS = ("助手", "ai", "你", "机器人", "bot", "assistant", "模型")
 
 # ---------------------------------------------------------------------------
 # Elaina 表情包：默认配置（对齐原版 astrbot_plugin_Elaina_meme_Bridge）
@@ -1057,6 +1089,9 @@ class DailyDigestCore(_PluginCoreBase):
         self._fallback_sched = None
         self._cron_job_id = None
         self._cron_check_job_id = None
+        # 发送防重：08:00 定时任务与 5 分钟兜底检查会同时触发，靠 KV 读改写挡不住
+        # （生成一份简报要 1~2 分钟，两个协程都能在写回之前通过检查 -> 一天发两遍）
+        self._digest_lock = asyncio.Lock()
         # 天气防高并发状态：每城市单飞锁 + 全局请求节流 + 每日调用计数
         self._weather_locks: dict[str, asyncio.Lock] = {}
         self._last_weather_call = 0.0
@@ -1204,34 +1239,56 @@ class DailyDigestCore(_PluginCoreBase):
         """兜底检查（每 5 分钟）：错过 08:00（设备休眠/网络中断/cron misfire）时补发"""
         await self._maybe_send_digest()
 
-    async def _maybe_send_digest(self) -> None:
-        """每天最多发送一次：到达发送时间且在补发窗口内则生成并发送，成功后记录已发日期。"""
+    async def _maybe_send_digest(self, force: bool = False) -> None:
+        """每天最多发送一次：到达发送时间且在补发窗口内则生成并发送，成功后记录已发日期。
+
+        force=True 时忽略「今天已发」与时间窗（供手动 /每日简报 使用）。
+
+        并发防护分两层（缺一不可）：
+        1. ``self._digest_lock``：08:00 定时任务与每 5 分钟兜底检查会**同时**触发，
+           生成一份简报要 1~2 分钟，旧的「先读 KV 再写回」会让两个协程都通过检查，
+           实测就是早上收到两遍简报。锁内二次读 KV 才能真正挡掉第二个。
+        2. **先占位再生成**：进锁后立刻把今天的日期写进 KV，异常时清空回滚。
+           这样即使进程在生成途中被重启，也不会在同一天重复发送。
+        """
         try:
             now = self._now_local()
             today = now.strftime("%Y-%m-%d")
-            try:
-                last = (await self.get_kv_data("last_digest_date", "")) or ""
-            except Exception:
-                last = ""
-            if last == today:
-                return
-            start_h, start_m = self._send_window_start()
-            deadline_h, deadline_m = self._send_deadline()
-            now_min = now.hour * 60 + now.minute
-            if now_min < start_h * 60 + start_m:
-                return  # 还没到发送时间
-            if now_min > deadline_h * 60 + deadline_m:
-                return  # 超过补发截止时间，今天放弃（避免深夜误发）
-            targets = await self._collect_target_sessions()
-            if not targets:
-                logger.warning("[daily_digest] 没有可推送的会话，跳过本次发送")
-                return
-            await self._generate_and_send(targets)
-            try:
-                await self.put_kv_data("last_digest_date", today)
-            except Exception as e:
-                logger.debug(f"[daily_digest] 记录发送日期失败: {e}")
-            logger.info(f"[daily_digest] 今日简报已发送（{today}）")
+            if not force:
+                start_h, start_m = self._send_window_start()
+                deadline_h, deadline_m = self._send_deadline()
+                now_min = now.hour * 60 + now.minute
+                if now_min < start_h * 60 + start_m:
+                    return  # 还没到发送时间
+                if now_min > deadline_h * 60 + deadline_m:
+                    return  # 超过补发截止时间，今天放弃（避免深夜误发）
+            async with self._digest_lock:
+                if not force:
+                    try:
+                        last = (await self.get_kv_data("last_digest_date", "")) or ""
+                    except Exception:
+                        last = ""
+                    if last == today:
+                        return  # 别的协程刚发完
+                targets = await self._collect_target_sessions()
+                if not targets:
+                    logger.warning("[daily_digest] 没有可推送的会话，跳过本次发送")
+                    return
+                # 原子占位：先写 KV 再生成，避免第二个协程在生成期间挤进来
+                try:
+                    await self.put_kv_data("last_digest_date", today)
+                except Exception as e:
+                    logger.debug(f"[daily_digest] 预占发送日期失败: {e}")
+                try:
+                    await self._generate_and_send(targets)
+                except Exception:
+                    # 生成/发送失败必须回滚，否则今天不会再补发
+                    try:
+                        await self.put_kv_data("last_digest_date", "")
+                    except Exception:
+                        pass
+                    raise
+                logger.info(f"[daily_digest] 今日简报已发送（{today}）")
         except Exception as e:
             logger.error(f"[daily_digest] 定时发送失败: {e}", exc_info=True)
 
@@ -3172,14 +3229,32 @@ class ProactiveGuardCore(_PluginCoreBase):
                     logger.warning(f"[proactive_guard] 总结会话记忆失败（{target}）: {e}")
             if not items:
                 return ""
+            # 多会话 -> 合并成一份去重档案。原来三分段并列，同一件事（熬夜、不吃早饭）
+            # 会被写三遍，注入时既费 token 又像复读。
+            merged = ""
+            if len(items) > 1:
+                try:
+                    packed = "\n\n".join(
+                        f"【会话 {i + 1}】\n{str(it.get('summary', '')).strip()}"
+                        for i, it in enumerate(items.values())
+                    )
+                    merged = await self._llm_chat(
+                        MEMORY_MERGE_PROMPT.format(items=packed, max_chars=max_chars)
+                    )
+                    merged = self._filter_memory_lines(merged)[:max_chars]
+                except Exception as e:
+                    logger.warning(f"[proactive_guard] 记忆合并失败，沿用分会话记忆: {e}")
+                    merged = ""
             store = {
                 "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "items": list(items.values()),
+                "merged": merged,
             }
             await self.put_kv_data(MEMORY_KEY, store)
             logger.info(
                 f"[proactive_guard] 记忆已更新：{len(items)} 个会话"
                 f"（{', '.join(str(it.get('umo', '')) for it in items.values())}）"
+                f"，合并档案 {'已生成' if merged else '未生成'}"
             )
             return self._memory_text(store)
         except Exception as e:
@@ -3194,19 +3269,58 @@ class ProactiveGuardCore(_PluginCoreBase):
         except Exception:
             pass
         return {"items": []}
-    @staticmethod
 
-    def _memory_text(store: dict) -> str:
-        """把记忆库渲染成注入提示词的一段文本。"""
-        items = [it for it in (store or {}).get("items", []) if it.get("summary")]
+    @staticmethod
+    def _filter_memory_lines(text: str) -> str:
+        """丢掉「在描述助手自己」的条目，并按内容去重。
+
+        兜底层：即使提示词写明不要写 AI 自我介绍，模型仍会加上「助手自称魔女」
+        「助手会提醒喝水」这类行。这些由人格设定负责，留在记忆里只会重复并挤占预算。
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in str(text or "").splitlines():
+            line = raw.strip().lstrip("-*•·　").strip()
+            if not line:
+                continue
+            head = line[:10].lower()
+            if head.startswith(_MEMORY_SELF_SUBJECTS) or "助手" in head:
+                continue
+            key = re.sub(r"[\s，。；、,.：:!！?？~～]+", "", line)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(line)
+        return "\n".join(out)
+
+    def _memory_text(self, store: dict) -> str:
+        """把记忆库渲染成注入提示词的一段文本。
+
+        优先用合并后的单一档案（merged）；没有（单会话 / 合并失败）才回退分会话拼装。
+        两种情况都过 _filter_memory_lines。
+        """
+        store = store or {}
+        merged = self._filter_memory_lines(str(store.get("merged") or ""))
+        if merged:
+            return merged
+        items = [it for it in store.get("items", []) if it and it.get("summary")]
         if not items:
             return ""
         if len(items) == 1:
-            return str(items[0]["summary"]).strip()
+            return self._filter_memory_lines(str(items[0]["summary"]).strip())
+        # 跨会话拼装：同名事实只留第一条（按「去掉标点后的正文」判重，
+        # 不能用「【umo】+正文」判重，否则前缀不同会让重复行全部留下）
         lines: list[str] = []
+        seen: set[str] = set()
         for it in items:
-            umo = str(it.get("umo", ""))
-            lines.append(f"【{umo}】{str(it['summary']).strip()}")
+            body = self._filter_memory_lines(str(it["summary"]).strip())
+            if not body:
+                continue
+            key = re.sub(r"[\s，。；、,.：:!！?？~～]+", "", body)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"【{it.get('umo', '')}】{body}")
         return "\n".join(lines)
 
     async def _collect_memory(self) -> str:
@@ -3487,18 +3601,29 @@ class ProactiveGuardCore(_PluginCoreBase):
             logger.error(f"[proactive_guard] 记忆总结失败: {e}", exc_info=True)
 
     async def memory_command(self, event: AstrMessageEvent):
-        """查看当前记忆库内容"""
+        """查看当前记忆库内容。
+
+        重点是展示「真正注入给 AI 的那份档案」（merged，已剔除 AI 自述 + 去重），
+        分会话明细放后面折叠显示，方便核对来源。
+        """
         store = await self._load_memory_store()
         items = [it for it in store.get("items", []) if it]
         lines: list[str] = ["🧠 记忆库"]
         if not items:
             lines.append("（还没有记忆。到 memory_cron 时间会自动总结，或现在用 /刷新记忆 立刻生成）")
         else:
-            lines.append(f"最后更新：{store.get('updated', '未知')}")
-            for it in items:
+            lines.append(f"最后更新：{store.get('updated', '未知')}　会话数：{len(items)}")
+            archive = self._memory_text(store)
+            lines.append("")
+            lines.append("—— 注入给 AI 的档案 ——")
+            lines.append(archive or "（空：记忆被过滤后没有剩下可用内容）")
+            if len(items) > 1:
                 lines.append("")
-                lines.append(f"【{it.get('umo', '')}】{it.get('updated', '')}")
-                lines.append(str(it.get("summary", "")).strip())
+                lines.append("—— 分会话明细 ——")
+                for it in items:
+                    body = str(it.get("summary", "")).strip()
+                    lines.append(f"【{it.get('umo', '')}】{it.get('updated', '')}")
+                    lines.append(body[:400] + ("…" if len(body) > 400 else ""))
         if not self._cfg_bool("memory_enabled", True):
             lines.append("")
             lines.append("⚠️ 记忆功能当前已关闭（memory_enabled = false）")

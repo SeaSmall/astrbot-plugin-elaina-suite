@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import importlib.util
 import inspect
 import json
@@ -709,6 +710,102 @@ async def main():
     assert any("chinanews" in u for u in mod.DEFAULT_FEEDS["feeds_intl"])
     print("[19] 渲染结果分流 + 宽松解析 + 国际源修复 OK")
 
+    # [20] 记忆质量 + 日报重复发送防护（2026-10-17 真机投诉回归）
+    # 20a) 助手自述行必须被丢掉；跨行重复只留一条
+    _raw = "\n".join(
+        [
+            "助手自称魔女，语气温柔",
+            "AI 会提醒用户喝水",
+            "你会给用户做饭",
+            "用户喜欢吃辣。",
+            "用户喜欢吃辣",
+            "用户的妹妹在读高三",
+        ]
+    )
+    _kept = pg._filter_memory_lines(_raw)
+    assert "助手" not in _kept, _kept
+    assert "AI" not in _kept, _kept
+    assert "做饭" not in _kept, _kept
+    assert _kept.count("喜欢吃辣") == 1, _kept
+    assert "妹妹在读高三" in _kept, _kept
+
+    # 20b) _memory_text 优先 merged；无 merged 时跨会话去重
+    _st = {
+        "items": [
+            {"umo": "a", "summary": "用户喜欢吃辣"},
+            {"umo": "b", "summary": "用户喜欢吃辣"},
+        ],
+        "merged": "用户喜欢吃辣",
+    }
+    assert pg._memory_text(_st) == "用户喜欢吃辣", pg._memory_text(_st)
+    _st2 = dict(_st, merged="")
+    _t2 = pg._memory_text(_st2)
+    assert _t2.count("喜欢吃辣") == 1, _t2
+
+    # 20c) 多会话时 refresh_memory 会调合并代理，合并结果已过滤 + 去重
+    async def _two_sessions():
+        return ["umo1", "umo2"]
+
+    async def _hl(cm, umo, turns):
+        return ["用户：我妹妹在读高三", "你：记下了"]
+
+    _mem_calls = []
+
+    async def _llm_mem(prompt):
+        if "合并成" in prompt:
+            _mem_calls.append("merge")
+            return "助手自称魔女\n用户妹妹在读高三\n用户妹妹在读高三。"
+        _mem_calls.append("per")
+        return "用户妹妹在读高三"
+
+    pg._collect_target_sessions = _two_sessions
+    pg._history_lines = _hl
+    pg._llm_chat = _llm_mem
+    _out2 = await pg.refresh_memory()
+    assert "merge" in _mem_calls, _mem_calls
+    assert "助手" not in _out2, _out2
+    assert _out2.count("妹妹在读高三") == 1, _out2
+    _st3 = await pg._load_memory_store()
+    assert _st3.get("merged"), _st3
+
+    # 20d) 日报：08:00 定时任务与 5 分钟兜底检查并发触发，只能发一次
+    _dd_kv = {}
+
+    async def _dd_get(k, d=None):
+        return _dd_kv.get(k, d)
+
+    async def _dd_put(k, v):
+        _dd_kv[k] = v
+
+    dd.get_kv_data = _dd_get
+    dd.put_kv_data = _dd_put
+    dd._now_local = lambda: datetime.datetime(2026, 10, 17, 9, 0)
+    dd._collect_target_sessions = _two_sessions
+    _runs = []
+
+    async def _slow_send(targets):
+        _runs.append(list(targets))
+        await asyncio.sleep(0.05)
+
+    dd._generate_and_send = _slow_send
+    _dd_kv.pop("last_digest_date", None)
+    await asyncio.gather(dd._maybe_send_digest(), dd._maybe_send_digest())
+    assert len(_runs) == 1, _runs
+    assert _dd_kv.get("last_digest_date") == "2026-10-17", _dd_kv
+
+    # 20e) 生成失败要回滚占位，否则当天再也不补发
+    async def _boom(targets):
+        raise RuntimeError("send failed")
+
+    dd._generate_and_send = _boom
+    _dd_kv.pop("last_digest_date", None)
+    await dd._maybe_send_digest()
+    assert not _dd_kv.get("last_digest_date"), _dd_kv
+    dd._generate_and_send = _slow_send
+    _runs.clear()
+    await dd._maybe_send_digest()
+    assert len(_runs) == 1, "失败后应能重新补发"
+    print("[20] 记忆质量（去 AI 自述/跨会话合并）+ 日报防重复发送 OK")
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
     print("[16] terminate() 完成，门禁已卸载")
