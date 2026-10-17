@@ -659,6 +659,56 @@ async def main():
     assert len(_cut) < len(_long), (len(_cut), len(_long))
     print("[18] 记忆库 + 子代理流水线（含回退单次生成）OK")
 
+    # [19] 本周真机缺陷回归：渲染结果分流 / 宽松解析 / 国际源
+    # 19a) _image_chain：本地路径（AstrBot 网络渲染失败时会返回容器内文件路径）
+    _tmpfile = os.path.join(tempfile.mkdtemp(), "io_temp_img_1.jpg")
+    with open(_tmpfile, "wb") as f:
+        f.write(b"\xff\xd8\xff\xd9")
+    def _chain_type(ch):
+        first = ch.chain[0]
+        return first["type"] if isinstance(first, dict) else first.type
+
+    _ch = mod._image_chain(_tmpfile)
+    assert _chain_type(_ch) == "image", _ch
+    _ch2 = mod._image_chain("https://t2i.example/x.jpeg")
+    assert _chain_type(_ch2) == "image"
+    _ch3 = mod._image_chain("file://" + _tmpfile)
+    assert _chain_type(_ch3) == "image"
+    _ch4 = mod._image_chain("base64://aGVsbG8=")
+    assert _chain_type(_ch4) == "image"
+    try:
+        mod._image_chain("")
+        raise AssertionError("空渲染结果应抛错")
+    except ValueError:
+        pass
+    # 19b) 宽松解析：代码围栏 + 全角冒号 + 尾逗号 + 全角引号
+    times = ["07:35", "12:10"]
+    _fenced = (
+        "```json\n[{\"time\":\"07：35\",\"text\":\"早呀\"},\n"
+        " {\"time\":\"12:10\",\"text\":\"吃饭没\"},]\n```"
+    )
+    got = pg._parse_items(_fenced, times)
+    assert [g["time"] for g in got] == ["07:35", "12:10"], got
+    # 19c) 行解析：带序号 + markdown 强调 + 破折号
+    got2 = pg._parse_items("1. **07:35** — 早呀\n2. `12:10` 吃饭没", times)
+    assert [g["time"] for g in got2] == ["07:35", "12:10"], got2
+    # 19d) _normalize_time 全角/点号/中文点
+    assert pg._normalize_time("07：05") == "07:05"
+    assert pg._normalize_time("7.5") == "07:05"
+    assert pg._normalize_time("07点05") == "07:05"
+    assert pg._normalize_time("25:99") == "25:99"
+    # 19e) _parse_points 同款宽松
+    pts = pg._parse_points(
+        '```\n[{"time":"07：35","point":"打个招呼"},\n'
+        ' {"time":"12:10","topic":"午饭"},]\n```',
+        times,
+    )
+    assert pts == [("07:35", "打个招呼"), ("12:10", "午饭")], pts
+    # 19f) 国际源不再有 404 的 chinadaily
+    assert "chinadaily" not in json.dumps(mod.DEFAULT_FEEDS), mod.DEFAULT_FEEDS
+    assert any("chinanews" in u for u in mod.DEFAULT_FEEDS["feeds_intl"])
+    print("[19] 渲染结果分流 + 宽松解析 + 国际源修复 OK")
+
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
     print("[16] terminate() 完成，门禁已卸载")

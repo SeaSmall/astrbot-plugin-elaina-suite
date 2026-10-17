@@ -143,7 +143,9 @@ DEFAULT_FEEDS = {
     ],
     "feeds_intl": [
         "cctv:world",
-        "https://www.chinadaily.com.cn/rss/world_rss.xml",
+        # chinadaily 的 world_rss.xml 已 404（实测），换成中国新闻网与 CGTN
+        "https://www.chinanews.com.cn/rss/world.xml",
+        "https://www.cgtn.com/subscribe/rss/section/world.xml",
     ],
     "feeds_tech": [
         "https://www.ithome.com/rss/",
@@ -347,6 +349,104 @@ def _sanitize_for_image(text: str) -> str:
     # 单下划线斜体：_文字_ -> 文字
     text = re.sub(r"(?<![A-Za-z0-9_])_(.+?)_(?![A-Za-z0-9_])", r"\1", text)
     return text
+
+
+def _image_chain(render_result) -> MessageChain:
+    """把 text_to_image(return_url=True) 的返回值转成可发送的图片消息链。
+
+    AstrBot 的 render_t2i 会先走网络渲染（成功时返回 https URL），
+    网络不可用或超时时回退到本地 PIL 渲染，此时返回的是**容器内的文件路径**
+    （例如 /AstrBot/data/temp/io_temp_img_1792221389_8477ba.jpg）。
+    旧代码一律用 MessageChain().url_image(...)，本地路径会被 Image.fromURL
+    判定为非法 URL 并抛 "not a valid url"，导致日报/健康报告的图片
+    100% 发送失败、静默退回纯文本。
+    """
+    if render_result is None:
+        raise ValueError("渲染结果为空")
+    r = str(render_result).strip()
+    if not r:
+        raise ValueError("渲染结果为空")
+    low = r.lower()
+    if low.startswith(("http://", "https://")):
+        return MessageChain().url_image(r)
+    if low.startswith("file://"):
+        r = urllib.parse.unquote(r[len("file://"):])
+        return MessageChain().file_image(r)
+    if low.startswith("base64://"):
+        return MessageChain().base64_image(r[len("base64://"):])
+    if low.startswith("data:image") and ";base64," in r:
+        return MessageChain().base64_image(r.split(";base64,", 1)[1])
+    if os.path.isfile(r):
+        return MessageChain().file_image(r)
+    # 兜底：交给 AstrBot 自己判断（可能是不带协议的 URL）
+    return MessageChain().url_image(r)
+
+
+def _loose_llm_text(text, for_json: bool = False) -> str:
+    """把 LLM 输出里常见的非标准写法拉回可解析形态。
+
+    实测踩过的雷（NAS 上 00:00 的计划生成直接失败）：
+      * 输出被 ```json 代码围栏包住；
+      * 时间写成全角冒号「07：35」或「07.35」；
+      * JSON 里用了全角引号/花括号/方括号；
+      * 数组末尾多一个逗号（json.loads 直接抛）。
+    这里只做「结构层」归一，正文措辞一个字都不改（引号归一仅在 for_json 时做）。
+    """
+    if not text:
+        return ""
+    t = str(text).replace("\ufeff", "")
+    # 去掉 ```json / ``` 围栏
+    t = re.sub(r"```[A-Za-z0-9_+-]*", "", t)
+    # 时间里的全角冒号 / 点号 / 中点：07：35 -> 07:35
+    t = re.sub(r"(\d{1,2})\s*[：﹕．·]\s*(\d{2})", r"\1:\2", t)
+    # JSON 结构用的全角括号
+    t = (
+        t.replace("｛", "{")
+        .replace("｝", "}")
+        .replace("［", "[")
+        .replace("］", "]")
+    )
+    # 尾逗号：{"a":1,} / [1,2,]
+    t = re.sub(r",\s*([}\]])", r"\1", t)
+    if for_json:
+        t = (
+            t.replace("“", '"')
+            .replace("”", '"')
+            .replace("‘", "'")
+            .replace("’", "'")
+        )
+    return t
+
+
+def _json_objects(text: str) -> list[dict]:
+    """从文本里尽力捞出 JSON 对象：先整数组，再逐个 {...} 兜底。"""
+    out: list[dict] = []
+    m = re.search(r"\[.*\]", text, re.S)
+    if m:
+        try:
+            arr = json.loads(m.group(0))
+        except Exception:
+            arr = None
+        if isinstance(arr, list):
+            out.extend(o for o in arr if isinstance(o, dict))
+            return out
+        for chunk in re.findall(r"\{[^{}]*\}", m.group(0), re.S):
+            try:
+                obj = json.loads(chunk)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        if out:
+            return out
+    for chunk in re.findall(r"\{[^{}]*\}", text, re.S):
+        try:
+            obj = json.loads(chunk)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
 
 
 def _parse_date(text: str) -> datetime | None:
@@ -1234,13 +1334,18 @@ class DailyDigestCore(_PluginCoreBase):
             render_text = _sanitize_for_image(text)
             url = await self.text_to_image(render_text, return_url=True)
             if not url:
-                logger.warning("[daily_digest] 简报渲染图片返回空 URL")
+                logger.warning("[daily_digest] 简报渲染图片返回空")
+                return False
+            try:
+                chain = _image_chain(url)
+            except Exception as e:
+                logger.error(f"[daily_digest] 渲染结果无法转成图片消息链: {e}（原始值={str(url)[:120]}）")
                 return False
             ok_cnt = 0
             for umo in targets:
                 try:
                     await asyncio.wait_for(
-                        self._gated_send(umo, MessageChain().url_image(url)),
+                        self._gated_send(umo, chain),
                         timeout=90,
                     )
                     ok_cnt += 1
@@ -2821,44 +2926,56 @@ class ProactiveGuardCore(_PluginCoreBase):
 
     @staticmethod
     def _normalize_time(t: str) -> str:
-        t = t.strip()
-        try:
-            h, m = t.split(":")
-            return f"{int(h):02d}:{int(m):02d}"
-        except Exception:
-            return t
-
-    def _parse_items(self, text: str, expected_times: list[str]) -> list[dict]:
-        items: list[dict] = []
-        # 1) JSON 数组
-        m = re.search(r"\[.*\]", text, re.S)
+        """把 7:5 / 07：05 / 7.5 / 07点05 统一成 07:05；认不出就原样返回。"""
+        t = str(t or "").strip().strip("`'\"“”[]【】()（）")
+        # 全角冒号 / 点号 / 中文「点」
+        t = re.sub(r"(\d{1,2})\s*[：﹕．·.点]\s*(\d{1,2})", r"\1:\2", t)
+        m = re.match(r"^(\d{1,2})\s*:\s*(\d{1,2})", t)
         if m:
             try:
-                arr = json.loads(m.group(0))
-                if isinstance(arr, list):
-                    for obj in arr:
-                        if not isinstance(obj, dict):
-                            continue
-                        t = self._normalize_time(str(obj.get("time", "")).strip())
-                        msg = str(
-                            obj.get("text") or obj.get("message") or ""
-                        ).strip()
-                        if t in expected_times and msg:
-                            items.append({"time": t, "text": msg})
+                h, mi = int(m.group(1)), int(m.group(2))
             except Exception:
-                pass
-        # 2) 行解析：HH:MM|text / HH:MM: text / HH:MM text（去掉行首编号后匹配）
+                return t
+            if 0 <= h <= 23 and 0 <= mi <= 59:
+                return f"{h:02d}:{mi:02d}"
+        return t
+
+    def _parse_items(self, text: str, expected_times: list[str]) -> list[dict]:
+        """解析 [{time, text}]。JSON 优先，失败退化到逐行 HH:MM …，都失败返回 []。"""
+        items: list[dict] = []
+        if not isinstance(text, str) or not text.strip():
+            return items
+
+        def _take(obj: dict) -> None:
+            t = self._normalize_time(str(obj.get("time", "")).strip())
+            msg = str(
+                obj.get("text")
+                or obj.get("message")
+                or obj.get("content")
+                or obj.get("msg")
+                or ""
+            ).strip()
+            if t in expected_times and msg:
+                items.append({"time": t, "text": msg})
+
+        # 1) JSON（允许代码围栏/全角标点/尾逗号）
+        for obj in _json_objects(_loose_llm_text(text, for_json=True)):
+            _take(obj)
+
+        # 2) 行解析：HH:MM|text / HH:MM: text / HH:MM text（去掉行首编号与 markdown 强调）
         if not items:
-            for line in text.splitlines():
+            for line in _loose_llm_text(text).splitlines():
                 line = re.sub(r"^(?:\d+\s*[.、)）\-]\s*)+", "", line.strip())
+                line = line.strip("*_`> ").strip()
                 m2 = re.match(
-                    r"^(\d{1,2}:\d{2})\s*[:|\-]\s*(.+)$", line
-                ) or re.match(r"^(\d{1,2}:\d{2})\s+(.+)$", line)
+                    r"^(\d{1,2}:\d{2})\s*[:|\-—]?\s*(.+)$", line
+                )
                 if m2:
                     t = self._normalize_time(m2.group(1))
-                    msg = m2.group(2).strip()
+                    msg = m2.group(2).strip().strip("*_` ").strip()
                     if t in expected_times and msg:
                         items.append({"time": t, "text": msg})
+
         # 3) 去重（同一时间只保留一条）
         seen: set[str] = set()
         dedup: list[dict] = []
@@ -2866,6 +2983,11 @@ class ProactiveGuardCore(_PluginCoreBase):
             if it["time"] not in seen:
                 seen.add(it["time"])
                 dedup.append(it)
+        if not dedup:
+            logger.warning(
+                f"[proactive_guard] 解析不出任何时间点（期望 {expected_times}），"
+                f"原始输出前 300 字：{_loose_llm_text(text)[:300]!r}"
+            )
         return dedup
 
     async def _dispatch_due(self) -> None:
@@ -3295,47 +3417,48 @@ class ProactiveGuardCore(_PluginCoreBase):
         """解析规划代理的 [{time, point}]。字段兼容 point/plan/topic/text。"""
         out: list[tuple[str, str]] = []
         if not isinstance(text, str) or not text.strip():
-            text = ""
-        m = re.search(r"\[.*\]", text, re.S)
-        if m:
-            try:
-                arr = json.loads(m.group(0))
-            except Exception:
-                arr = None
-            if isinstance(arr, list):
-                for obj in arr:
-                    if not isinstance(obj, dict):
-                        continue
-                    t = self._normalize_time(str(obj.get("time", "")).strip())
-                    point = str(
-                        obj.get("point")
-                        or obj.get("plan")
-                        or obj.get("topic")
-                        or obj.get("text")
-                        or ""
-                    ).strip()
+            return [(t, "自然地聊一句，贴合这个时间的场景") for t in expected_times]
+
+        def _take(obj: dict) -> None:
+            t = self._normalize_time(str(obj.get("time", "")).strip())
+            point = str(
+                obj.get("point")
+                or obj.get("plan")
+                or obj.get("topic")
+                or obj.get("text")
+                or obj.get("content")
+                or ""
+            ).strip()
+            if t in expected_times and point:
+                out.append((t, point))
+
+        for obj in _json_objects(_loose_llm_text(text, for_json=True)):
+            _take(obj)
+
+        if not out:
+            # 行解析：HH:MM 要点
+            for line in _loose_llm_text(text).splitlines():
+                line = re.sub(r"^(?:\d+\s*[.、)）\-]\s*)+", "", line.strip())
+                line = line.strip("*_`> ").strip()
+                m2 = re.match(r"^(\d{1,2}:\d{2})\s*[:|\-—]?\s*(.+)$", line)
+                if m2:
+                    t = self._normalize_time(m2.group(1))
+                    point = m2.group(2).strip().strip("*_` ").strip()
                     if t in expected_times and point:
                         out.append((t, point))
         if not out:
-            # 行解析：HH:MM 要点
-            for line in text.splitlines():
-                line = re.sub(r"^(?:\d+\s*[.、)）\-]\s*)+", "", line.strip())
-                m2 = re.match(
-                    r"^(\d{1,2}:\d{2})\s*[:|\-]?\s*(.+)$", line
-                )
-                if m2:
-                    t = self._normalize_time(m2.group(1))
-                    point = m2.group(2).strip()
-                    if t in expected_times and point:
-                        out.append((t, point))
+            logger.warning(
+                f"[proactive_guard] 规划代理输出解析不出要点（期望 {expected_times}），"
+                f"原始输出前 300 字：{_loose_llm_text(text)[:300]!r}"
+            )
         # 去重 + 按输入时间顺序对齐（缺失的时间点用通用要点补齐，避免整天少几条）
         seen: dict[str, str] = {}
         for t, p in out:
             if t not in seen:
                 seen[t] = p
         return [(t, seen.get(t, "自然地聊一句，贴合这个时间的场景")) for t in expected_times]
-    @staticmethod
 
+    @staticmethod
     def _clean_message(text: str) -> str:
         """清掉写手代理可能多输出的包装：引号、时间前缀、编号、解释。"""
         if not isinstance(text, str):
@@ -4439,11 +4562,12 @@ class SystemHealthCore(_PluginCoreBase):
         try:
             url = await self.text_to_image(text, return_url=True)
             if url:
+                chain = _image_chain(url)
                 ok = 0
                 for umo in targets:
                     try:
                         await asyncio.wait_for(
-                            self.owner._gated_send(umo, MessageChain().url_image(url)),
+                            self.owner._gated_send(umo, chain),
                             timeout=90,
                         )
                         ok += 1

@@ -14,3 +14,11 @@ class MessageChain:
     @classmethod
     def url_image(cls, url):
         return cls(chain=[{"type": "image", "url": url}])
+
+    @classmethod
+    def file_image(cls, path):
+        return cls(chain=[{"type": "image", "file": path}])
+
+    @classmethod
+    def base64_image(cls, b64):
+        return cls(chain=[{"type": "image", "base64": b64}])

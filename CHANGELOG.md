@@ -241,3 +241,35 @@
 
 - README 同步（功能描述、指令清单、配置项数量 84→93 与键清单、
   新增「`/记忆` 显示没有记忆怎么办」FAQ）；metadata 版本 → 1.1.1。
+
+## v1.1.2
+
+### 🐛 修复
+
+- **日报图片 100% 发送失败（日志刷 `not a valid url`）**：`text_to_image(return_url=True)`
+  在 AstrBot 网络渲染不可用/超时时会回退到**本地 PIL 渲染**，此时返回的是容器内文件路径
+  （如 `/AstrBot/data/temp/io_temp_img_1792221389_8477ba.jpg`）而不是 URL。旧代码一律
+  `MessageChain().url_image(...)`，平台侧 `Image.fromURL` 判为非法 → 图片全部失败后静默
+  退回纯文本，`digest_also_send_md` 的「一份图片 + 一份 md」实际永远只到 md。
+  新增模块级 `_image_chain()`，按 `http(s)://` / `file://` / `base64://` /
+  `data:image;base64,` / 本地路径 分流构造消息链；`_send_image` 与系统健康报告同步修复。
+- **主动消息「计划生成失败：无法解析 LLM 输出」，当天一条都不发**：`_parse_items` /
+  `_parse_points` 只认严格 JSON 与半角 `HH:MM`。新增 `_loose_llm_text()`（剥 ```json 围栏、
+  全角冒号/点号/中文「点」、全角括号、尾逗号）与 `_json_objects()`（整数组解析失败则逐个
+  `{...}` 兜底），`_normalize_time()` 支持 `07：05` / `7.5` / `07点05`；行解析容错
+  markdown 强调符与破折号；解析彻底为空时把原始输出前 300 字写进 warning 日志，便于定位。
+- **国际新闻源 404**：`feeds_intl` 默认的 `chinadaily.com.cn/rss/world_rss.xml` 已 404，
+  换成 `chinanews.com.cn/rss/world.xml`（实测 30 条）+ `cgtn.com/.../world.xml`（50 条）。
+
+### ✅ 测试
+
+- 新增第 [19] 组：`_image_chain` 四种输入分流（本地路径 / https / file:// / base64）、
+  代码围栏 + 全角冒号 + 尾逗号 + 全角引号解析、带序号/加粗/反引号的行解析、
+  `_normalize_time` 四种写法、`_parse_points` 宽松解析、国际源不含 404 域名。
+  20 组冒烟全部通过（`ALL SMOKE TESTS PASSED`）。
+
+### 🔧 其它
+
+- 测试桩 `tests/stubs/astrbot/api/event/__init__.py` 的 `MessageChain` 补
+  `file_image` / `base64_image`，与真实 AstrBot API 对齐。
+- `metadata.yaml` 版本 → 1.1.2。
