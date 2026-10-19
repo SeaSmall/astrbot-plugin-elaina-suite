@@ -269,13 +269,28 @@ MEMORY_BLOCK_TEMPLATE = """
 
 MEMORY_KEY = "memory_store"
 
+# 用户自己写在 AstrBot 工作区里的笔记（workspaces/<会话>/user_profile.md）。
+# 这份是「事实」而不是「AI 的滚动摘要」：用户改了笔记就该立刻生效。
+MEMORY_NOTES_TEMPLATE = """
+【用户笔记】用户本人写下的事实（优先级高于下面的记忆摘要，两者冲突时以笔记为准）：
+{notes}"""
+
+# AstrBot 会把当前时间塞进用户消息里：
+# <system_reminder>Current datetime: 2026-10-13 20:33 (CST), Weekday: Tuesday</system_reminder>
+# 记忆必须知道「哪句话是哪天说的」，否则旧待办会一直被当成仍然成立。
+_TS_RE = re.compile(r"Current datetime:\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})")
+_SYS_REMINDER_RE = re.compile(r"<system_reminder>.*?</system_reminder>", re.S)
+
 MEMORY_PROMPT = """你是一个记忆整理助手。你的任务是把对话里**关于这位用户这个人**的信息记下来，
 写成一份随时能查的个人档案。
 
 已有记忆（上一轮的总结，可能为空）：
 {old}
 
-新的对话记录（从早到晚）：
+用户笔记（用户本人写的，事实优先级最高；与记忆冲突时以它为准）：
+{notes}
+
+新的对话记录（从早到晚，每行前的 [日期 时间] 是这句话说出的时间）：
 {raw}
 
 要记什么（这是重点）：
@@ -293,6 +308,12 @@ MEMORY_PROMPT = """你是一个记忆整理助手。你的任务是把对话里*
 - 不要把「用户这一次让你做什么」当成长期事实（一次性指令不是档案）
 - 不要记一次性琐事；有日期的事可以记但要带日期，超过 7 天的旧安排不再保留
 - 不要编造对话里没出现过的信息
+
+处理旧记忆里「待办 / 未完成 / 计划」这类条目的规则（最容易出错，务必遵守）：
+- 如果新对话里出现了「已经做了 / 领过了 / 办完了」这类说法，立刻删掉对应待办，改成「已…（日期）」
+- 如果用户笔记里已经写了结果，以笔记为准，旧的待办一律删掉
+- 旧待办如果在新对话里完全没被提起，且看不出是长期目标，也删掉——不要假设它仍然成立
+- 宁可少记，也不要把已经过期的事当成正在发生
 
 写法：
 - 第三人称，主语是「用户…」，短句分条，每行一条
@@ -2500,6 +2521,8 @@ class ProactiveGuardCore(_PluginCoreBase):
         self._fallback_sched = None
         self._last_user_activity: dict[str, float] = {}
         self._gen_lock = asyncio.Lock()
+        # 记忆刷新互斥：定时任务、生成前冷却刷新、/刷新记忆 可能同时触发
+        self._memory_lock = asyncio.Lock()
         self._last_gen_attempt = 0.0
         self._migrated = False
 
@@ -3204,15 +3227,29 @@ class ProactiveGuardCore(_PluginCoreBase):
             items = {str(it.get("umo", "")): it for it in store.get("items", []) if it}
             max_chars = max(200, self._cfg_int("memory_max_chars", 1500))
             turns = max(2, self._cfg_int("memory_turns", 20))
+            window_hours = max(0, self._cfg_int("memory_window_hours", 48))
+            rewrite_stale = self._cfg_bool("memory_rewrite_stale", True)
+            notes = await self._collect_user_notes()
             for target in targets:
                 try:
-                    lines = await self._history_lines(cm, target, turns)
-                    if not lines:
-                        continue
+                    lines = await self._history_lines(cm, target, turns, window_hours)
                     old = str(items.get(target, {}).get("summary", "")).strip()
-                    raw = "\n".join(lines)
+                    # 没有新对话的会话原来直接 continue，导致旧摘要里的错误永远不被修正
+                    # （比如「待办：万事达卡」即使人早领了也一直留着）。这里让旧记忆
+                    # 也按新规则过一次，只整理、不新增。
+                    if not lines and not (rewrite_stale and old):
+                        continue
+                    if lines:
+                        raw = "\n".join(lines)
+                    else:
+                        raw = (
+                            "（这个会话近期没有新对话。请只整理上面的旧记忆：删掉已完成、"
+                            "已过期、被用户笔记否定的条目，合并重复项，保留仍然成立的事实；"
+                            "不要新增任何对话里没出现过的信息。）"
+                        )
                     prompt = MEMORY_PROMPT.format(
                         old=old or "（暂无）",
+                        notes=notes or "（无）",
                         raw=raw[-max_chars * 2 :],
                         max_chars=max_chars,
                     )
@@ -3323,27 +3360,104 @@ class ProactiveGuardCore(_PluginCoreBase):
             lines.append(f"【{it.get('umo', '')}】{body}")
         return "\n".join(lines)
 
+    def _workspaces_dir(self) -> Path:
+        """AstrBot 数据目录下的 workspaces（插件在 <data>/plugins/<name>/main.py）。"""
+        try:
+            return Path(__file__).resolve().parent.parent.parent / "workspaces"
+        except Exception:
+            return Path("")
+
+    async def _collect_user_notes(self) -> str:
+        """读取用户自己写在工作区里的 user_profile.md。
+
+        为什么必须读它：记忆摘要由 AI 滚动生成，用户改的事实（例如「卡已领」）
+        要等下一轮总结才可能被吸收，而且常常被旧摘要里的待办压住。笔记是用户
+        亲手写的**事实源**，直接拼进上下文，改写立刻生效、绕开摘要滞后。
+        """
+        if not self._cfg_bool("memory_notes_enabled", True):
+            return ""
+        budget = max(200, self._cfg_int("memory_notes_chars", 1200))
+        try:
+            root = self._workspaces_dir()
+            if not root or not root.is_dir():
+                return ""
+            files = sorted(
+                root.glob("*/user_profile.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception as e:
+            logger.debug(f"[proactive_guard] 扫描用户笔记失败: {e}")
+            return ""
+        chunks: list[str] = []
+        seen: set[str] = set()
+        used = 0
+        for f in files[:5]:
+            try:
+                body = f.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            body = re.sub(r"\n{3,}", "\n\n", body)[:budget]
+            key = re.sub(r"\s+", "", body)
+            if not body or key in seen:
+                continue
+            seen.add(key)
+            chunks.append(body)
+            used += len(body)
+            if used >= budget:
+                break
+        if not chunks:
+            return ""
+        logger.debug(f"[proactive_guard] 已读取用户笔记 {used} 字（{len(chunks)} 份）")
+        return MEMORY_NOTES_TEMPLATE.format(notes="\n".join(chunks))
+
     async def _collect_memory(self) -> str:
-        """取记忆文本：优先用 AI 总结过的记忆库；为空则实时总结一次；再不行退回原始历史。
+        """取记忆文本：AI 总结的记忆库 + 用户笔记；为空则实时总结；再不行退回原始历史。
 
         三级降级是为了保证「第一次运行、还没到总结时间」时也有记忆可用。
+        另外在返回前按 `memory_refresh_cooldown` 冷却做一次就地刷新——只靠每天
+        03:00 那一次，白天发生的事最多要滞后近 24 小时才可能进入主动消息。
         """
         if not self._cfg_bool("memory_enabled", True):
             return ""
+        notes = await self._collect_user_notes()
         try:
             store = await self._load_memory_store()
+            if await self._memory_refresh_due(store):
+                async with self._memory_lock:
+                    # 双检：等锁期间别人可能刚刷过
+                    store = await self._load_memory_store()
+                    if await self._memory_refresh_due(store):
+                        logger.debug("[proactive_guard] 记忆已过期，生成前就地刷新")
+                        await self.refresh_memory()
+                        store = await self._load_memory_store()
             text = self._memory_text(store)
+            if not text:
+                # 记忆库还空着：立刻总结一次（首次生成计划时就地建库）
+                text = await self.refresh_memory()
             if text:
-                return self._truncate_memory(text)
-            # 记忆库还空着：立刻总结一次（首次生成计划时就地建库）
-            text = await self.refresh_memory()
-            if text:
-                return self._truncate_memory(text)
+                merged = self._truncate_memory(text)
+                return (notes + "\n" + merged) if notes else merged
         except Exception as e:
             logger.debug(f"[proactive_guard] 读取记忆库失败，回退原始历史: {e}")
         if not self._cfg_bool("memory_raw_fallback", True):
-            return ""
-        return self._truncate_memory(await self._collect_raw_history())
+            return notes
+        raw = self._truncate_memory(await self._collect_raw_history())
+        if notes and raw:
+            return notes + "\n" + raw
+        return notes or raw
+
+    async def _memory_refresh_due(self, store: dict) -> bool:
+        """记忆是否到了该刷新的时间（按 memory_refresh_cooldown 分钟冷却）。"""
+        try:
+            cooldown = max(5, self._cfg_int("memory_refresh_cooldown", 30))
+            stamp = str((store or {}).get("updated", "") or "").strip()
+            if not stamp:
+                return True
+            last = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
+            return (datetime.now() - last).total_seconds() >= cooldown * 60
+        except Exception:
+            return False
 
     def _truncate_memory(self, text: str) -> str:
         budget = max(200, self._cfg_int("memory_max_chars", 1500))
@@ -3375,8 +3489,16 @@ class ProactiveGuardCore(_PluginCoreBase):
             logger.debug(f"[proactive_guard] 读取原始历史失败: {e}")
             return ""
 
-    async def _history_lines(self, cm, umo: str, turns: int) -> list[str]:
-        """把单个会话的历史整理成 [「用户：…」/「你：…」] 行列表（只取最近 turns 条）。"""
+    async def _history_lines(
+        self, cm, umo: str, turns: int, window_hours: int | None = None
+    ) -> list[str]:
+        """把单个会话的历史整理成「[MM-DD HH:MM] 用户：…」行列表。
+
+        `window_hours > 0` 时按时间窗过滤，而不是只数条数——只取「最近 N 条」
+        会让一句纠正很快滑出窗口，旧摘要里的错误待办就被原样继承下去。
+        时间来自 AstrBot 注入在用户消息里的 <system_reminder>Current datetime: …；
+        拿不到时间戳的老数据退化为「取最近 turns 条」。
+        """
         try:
             cid = await cm.get_curr_conversation_id(umo)
             if not cid:
@@ -3388,13 +3510,17 @@ class ProactiveGuardCore(_PluginCoreBase):
             history = json.loads(raw) if isinstance(raw, str) else raw
             if not isinstance(history, list):
                 return []
-            lines: list[str] = []
+            cutoff = None
+            if window_hours and window_hours > 0:
+                cutoff = datetime.now() - timedelta(hours=window_hours)
+            records: list[tuple[datetime | None, str]] = []
+            last_ts: datetime | None = None
             for msg in history:
                 if not isinstance(msg, dict):
                     continue
                 role = str(msg.get("role", ""))
                 content = msg.get("content", "")
-                # content 可能是多模态数组，只取文本部分
+                # content 可能是多模态数组，只取文本部分（think 段不带 text，自动跳过）
                 if isinstance(content, list):
                     parts = [
                         str(p.get("text", ""))
@@ -3402,14 +3528,33 @@ class ProactiveGuardCore(_PluginCoreBase):
                         if isinstance(p, dict) and p.get("text")
                     ]
                     content = " ".join(parts)
-                content = str(content).strip().replace("\n", " ")
+                content = str(content)
+                m = _TS_RE.search(content)
+                if m:
+                    try:
+                        last_ts = datetime.strptime(
+                            f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M"
+                        )
+                    except ValueError:
+                        pass
+                content = _SYS_REMINDER_RE.sub("", content).strip().replace("\n", " ")
                 if not content:
                     continue
                 if role == "user":
-                    lines.append(f"用户：{content}")
+                    records.append((last_ts, f"用户：{content}"))
                 elif role == "assistant":
-                    lines.append(f"你：{content}")
-            return lines[-turns:] if len(lines) > turns else lines
+                    records.append((last_ts, f"你：{content}"))
+            if cutoff is not None:
+                kept = [r for r in records if r[0] is None or r[0] >= cutoff]
+                # 全被时间窗滤掉（长时间没聊）时保留尾巴，别让记忆凭空失忆
+                if kept:
+                    records = kept
+            if len(records) > turns:
+                records = records[-turns:]
+            out: list[str] = []
+            for ts, line in records:
+                out.append(f"[{ts.strftime('%m-%d %H:%M')}] {line}" if ts else line)
+            return out
         except Exception as e:
             logger.debug(f"[proactive_guard] 读取会话历史失败（{umo}）: {e}")
             return []
@@ -3635,6 +3780,19 @@ class ProactiveGuardCore(_PluginCoreBase):
             yield event.plain_result("⚠️ 记忆功能已关闭，请先在配置里打开 memory_enabled。")
             return
         yield event.plain_result("⏳ 正在总结记忆…")
+        asyncio.create_task(self.refresh_memory())
+
+    async def reset_memory_command(self, event: AstrMessageEvent):
+        """清空记忆库并按当前规则重建（用来洗掉历史遗留的错误条目）。"""
+        if not self._cfg_bool("memory_enabled", True):
+            yield event.plain_result("⚠️ 记忆功能已关闭，请先在配置里打开 memory_enabled。")
+            return
+        # 必须走 KV 接口写空，不能直接改数据库：AstrBot 的 preferences 在内存里有副本，
+        # 直接改 sqlite 会被下一次写回覆盖掉。
+        await self.put_kv_data(MEMORY_KEY, {"updated": "", "items": [], "merged": ""})
+        yield event.plain_result(
+            "🧹 记忆库已清空，正在按「近期对话 + 用户笔记」重建…（完成后用 /记忆 查看）"
+        )
         asyncio.create_task(self.refresh_memory())
     # ================================================================== #
     # 指令（用户主动触发时才回复）
@@ -5019,6 +5177,12 @@ class ElainaSuitePlugin(Star):
     async def refresh_memory_command(self, event: AstrMessageEvent):
         """立刻让 AI 总结一次对话，写入记忆库。"""
         async for result in self.proactive_guard.refresh_memory_command(event):
+            yield result
+
+    @filter.command("记忆重置")
+    async def reset_memory_command(self, event: AstrMessageEvent):
+        """清空记忆库并按当前规则重建（洗掉历史遗留的错误条目）。"""
+        async for result in self.proactive_guard.reset_memory_command(event):
             yield result
 
     @filter.command("health", alias={"健康报告"})

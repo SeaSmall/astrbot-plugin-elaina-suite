@@ -81,7 +81,7 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_medical` / `feeds_policy` / `llm_prompt`
-- **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `subagent_enabled` / `subagent_parallel` / `subagent_concurrency` / `subagent_review` / `memory_enabled` / `memory_cron` / `memory_turns` / `memory_max_chars` / `memory_raw_fallback` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
+- **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `message_prompt` / `subagent_enabled` / `subagent_parallel` / `subagent_concurrency` / `subagent_review` / `memory_enabled` / `memory_cron` / `memory_turns` / `memory_window_hours` / `memory_refresh_cooldown` / `memory_rewrite_stale` / `memory_notes_enabled` / `memory_notes_chars` / `memory_max_chars` / `memory_raw_fallback` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
@@ -106,8 +106,10 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 **Q：系统健康报告没发？**
 - 多半是没装 psutil（日志有提示）；`pip install psutil` 后重载插件即可。
 **Q：`/记忆` 显示「还没有记忆」/ 主动消息不提聊过的事？**
-- 记忆是**后台攒出来**的：默认每天 03:00（`memory_cron`）才会总结一次，装好当天记忆库是空的属正常；想立刻要，用 `/刷新记忆` 手动触发一次。
+- 记忆是**后台攒出来**的：默认每天 03:00（`memory_cron`）全量总结一次，装好当天记忆库是空的属正常；想立刻要，用 `/刷新记忆` 手动触发一次。日常生成主动消息前，若记忆距上次刷新超过 `memory_refresh_cooldown`（默认 30 分钟）也会就地增量刷新一次，不会等到第二天。
 - 记忆的来源是**会话历史**，所以要能枚举到会话：如果 `pg_target_sessions` 留空且 AstrBot 的会话库读不到当前会话，总结就会没有对象（日志里 `记忆已更新：N 个会话` 的 N 会是 0）。这种情况直接填 `pg_target_sessions`，或在群里发一条消息后再 `/刷新记忆`。
+- 想让 AI 立刻知道某件事，最可靠的办法是写 **AstrBot 工作区里的 `user_profile.md`**（`<data>/workspaces/<会话>/user_profile.md`）：插件会把它读出来拼在记忆最前面，优先级高于 AI 的滚动摘要，改完下一条主动消息就生效，不用等总结。
+- 记忆里留下了**已经过期/已完成的待办**（AI 还在追问昨天做完的事）？用 `/记忆重置` 清空后重建（走插件 KV 接口）。**不要直接改 data_v4.db**：`preferences` 在 AstrBot 内存里有副本，直接改数据库会被下一次写回覆盖，删掉的记忆会自己回来。
 - 另外 `record_to_history` 打开时，插件自己发出的主动消息也会写回会话历史，这是**刻意**的：AI 才会记得自己昨天说过什么，不至于天天重复同一句。
 - 记忆里**故意不写 AI 自己的事**（「AI 自称魔女」「AI 会提醒喝水」这类）：语气与行为风格由人格设定负责，写进记忆只会和人格设定重复、互相打架，所以提示词里明令不记，注入前还会再过滤一遍。
 

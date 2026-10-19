@@ -306,3 +306,47 @@
 - 测试新增第 `[20]` 组：AI 自述过滤 / 跨会话去重 / merged 优先 / 并发只发一次 / 失败回滚可补发。
   `tests/test_merged.py` 20 组全过。
 - `metadata.yaml` 版本 → 1.1.3。
+
+## v1.1.4（2026-10-19）
+
+### 🧠 记忆系统：修四个真机暴露的病因
+
+真机上记忆表现为「用户明明说过做完了，AI 还一直问那件待办」，追下去是四条独立的问题：
+
+**① 子代理看不到用户笔记。** 规划/写手代理的提示词只拼了 persona + KV 记忆摘要，而用户手写在
+AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/user_profile.md`）从头到尾
+没人读，所以用户在笔记里改的事实（「卡已领」）根本进不了上下文。
+
+- 新增 `_collect_user_notes()` + `_workspaces_dir()` + `MEMORY_NOTES_TEMPLATE`：扫描
+  `workspaces/*/user_profile.md`，去重后拼进记忆块**最前面**，并在提示词里标明「用户本人写的，
+  优先级高于记忆摘要，冲突时以它为准」。
+- 新增配置 `memory_notes_enabled`（默认开）、`memory_notes_chars`（默认 1200）。
+
+**② 滚动摘要吃掉纠正。** 总结时只取「最近 20 条」，一句纠正很快滑出窗口；旧摘要里的
+「待办：万事达卡」就被原样继承，之后每次刷新都继承。
+
+- `_history_lines` 改为**按时间窗**取（`memory_window_hours`，默认 48 小时），时间从 AstrBot 注入在
+  用户消息里的 `<system_reminder>Current datetime: …</system_reminder>` 解析，并在每行前标
+  `[MM-DD HH:MM]`，让模型能判断「这条待办是哪天的」；同时剥掉 reminder 文本本身。
+- `MEMORY_PROMPT` 增加「处理旧记忆里待办/未完成/计划」的规则：新对话说「领过了」就立刻删掉对应待办、
+  用户笔记已写结果就以笔记为准、旧待办没被提起且不像长期目标也删掉。
+- 新增配置 `memory_rewrite_stale`（默认开）：**没有新对话的会话，旧摘要也按新规则重写一次**
+  （只整理不新增），否则历史遗留的脏条目永远清不掉。
+
+**③ 记忆只在 03:00 刷新一次。** 白天发生的事最多滞后近 24 小时才可能进入主动消息。
+
+- 新增 `_memory_refresh_due()` + `_memory_lock`：`_collect_memory` 在生成前按
+  `memory_refresh_cooldown`（默认 30 分钟）冷却就地刷新一次，并做双检避免定时任务/手动/生成
+  三处并发重复总结。
+
+**④ 直接改数据库会被盖回去。** AstrBot 的 `preferences` 表在内存里有副本，直接改 sqlite 会被下一次
+写回覆盖（删掉的记忆自己又回来了）。
+
+- 新增 `/记忆重置`：走插件 KV 接口把 `memory_store` 写空，再按「近期对话 + 用户笔记」重建。
+  洗历史脏记忆用这个，不要动数据库。
+
+### 🔧 其它
+
+- 测试新增第 `[21]` 组：时间窗过滤 + reminder 剥离 / 用户笔记读取 / 刷新冷却 / 笔记优先注入 /
+  重置走 KV。`tests/test_merged.py` 21 组全过。
+- `metadata.yaml` 版本 → 1.1.4。

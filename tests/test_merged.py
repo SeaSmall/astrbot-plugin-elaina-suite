@@ -746,7 +746,7 @@ async def main():
     async def _two_sessions():
         return ["umo1", "umo2"]
 
-    async def _hl(cm, umo, turns):
+    async def _hl(cm, umo, turns, window_hours=None):
         return ["用户：我妹妹在读高三", "你：记下了"]
 
     _mem_calls = []
@@ -806,6 +806,112 @@ async def main():
     await dd._maybe_send_digest()
     assert len(_runs) == 1, "失败后应能重新补发"
     print("[20] 记忆质量（去 AI 自述/跨会话合并）+ 日报防重复发送 OK")
+
+    # [21] 记忆四项真机病因回归（2026-10-19）
+    # 21a) 历史行带时间戳、剥掉 system_reminder、按时间窗过滤（而不是只数条数）
+    _now = datetime.datetime.now()
+
+    def _rem(ts):
+        return (
+            f"<system_reminder>Current datetime: {ts} (CST), "
+            "Weekday: Tuesday</system_reminder>"
+        )
+
+    _hist = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "万事达卡还没去领"
+                    + _rem((_now - datetime.timedelta(days=6)).strftime("%Y-%m-%d %H:%M")),
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "think", "think": "思考内容不该出现"},
+                {"type": "text", "text": "记得去领"},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "领过了"
+                    + _rem((_now - datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")),
+                }
+            ],
+        },
+    ]
+
+    class _FakeCM:
+        async def get_curr_conversation_id(self, umo):
+            return "c1"
+
+        async def get_conversation(self, umo, cid):
+            class _C:
+                history = json.dumps(_hist)
+
+            return _C()
+
+    _lines_all = await type(pg)._history_lines(pg, _FakeCM(), "umo", 20, None)
+    assert "system_reminder" not in "".join(_lines_all), _lines_all
+    assert "思考内容不该出现" not in "".join(_lines_all), _lines_all
+    assert _lines_all[-1].startswith("["), _lines_all[-1]
+    assert "领过了" in _lines_all[-1], _lines_all[-1]
+    _lines_win = await type(pg)._history_lines(pg, _FakeCM(), "umo", 20, 24)
+    assert not any("还没去领" in x for x in _lines_win), _lines_win
+    assert any("领过了" in x for x in _lines_win), _lines_win
+
+    # 21b) 工作区 user_profile.md 会被读进记忆（用户手写事实优先）
+    _tmp = tempfile.mkdtemp()
+    _ws = os.path.join(_tmp, "ws1")
+    os.makedirs(_ws)
+    with open(os.path.join(_ws, "user_profile.md"), "w", encoding="utf-8") as _f:
+        _f.write("# 用户档案\n- 万事达卡 2026-10-17 在城里已领\n- 不吃辣\n")
+    _orig_ws, _orig_int, _orig_bool = pg._workspaces_dir, pg._cfg_int, pg._cfg_bool
+    pg._workspaces_dir = lambda: mod.Path(_tmp)
+    pg._cfg_int = lambda k, d=0: d
+    pg._cfg_bool = lambda k, d=True: d
+    _notes = await pg._collect_user_notes()
+    assert "已领" in _notes and "不吃辣" in _notes, _notes
+    assert "用户笔记" in _notes, _notes
+
+    # 21c) 记忆刷新冷却：刚刷过不再刷，过期才刷
+    assert await pg._memory_refresh_due({"updated": ""}) is True
+    _recent = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    assert await pg._memory_refresh_due({"updated": _recent}) is False
+    _old = (datetime.datetime.now() - datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M")
+    assert await pg._memory_refresh_due({"updated": _old}) is True
+
+    # 21d) _collect_memory 把用户笔记拼在最前面（AI 摘要不会盖掉它）
+    _kv["memory_store"] = {
+        "updated": _recent,
+        "items": [{"umo": "u", "summary": "用户妹妹在读高三"}],
+        "merged": "用户妹妹在读高三",
+    }
+    _mem = await pg._collect_memory()
+    assert "用户笔记" in _mem, _mem
+    assert _mem.index("已领") < _mem.index("妹妹在读高三"), _mem
+
+    # 21e) /记忆重置 走 KV 写空（不能直接改 sqlite，会被内存副本盖回）
+    class _Ev:
+        def plain_result(self, t):
+            return t
+
+    async def _drain():
+        return [r async for r in pg.reset_memory_command(_Ev())]
+
+    _msgs = await _drain()
+    assert _msgs, _msgs
+    assert _kv["memory_store"]["items"] == [], _kv["memory_store"]
+    assert not _kv["memory_store"].get("merged"), _kv["memory_store"]
+
+    pg._workspaces_dir, pg._cfg_int, pg._cfg_bool = _orig_ws, _orig_int, _orig_bool
+    print("[21] 记忆四项病因（时间窗/用户笔记/冷却刷新/重置走KV）OK")
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
     print("[16] terminate() 完成，门禁已卸载")

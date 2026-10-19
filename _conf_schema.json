@@ -312,6 +312,31 @@
       "default": true,
       "description": "【记忆】记忆库为空且 AI 总结失败时，是否退回注入未总结的原始对话历史（更省事但更杂、更费 token）。关闭则没有记忆就直接空着"
     },
+    "memory_window_hours": {
+      "type": "int",
+      "default": 48,
+      "description": "【记忆】总结时按时间窗取对话（小时）。0 = 只按 memory_turns 数条数。按时间取能保证「昨天说已经做完的事」一定在窗口内，不会因为消息条数被挤出而让旧待办一直留着"
+    },
+    "memory_refresh_cooldown": {
+      "type": "int",
+      "default": 30,
+      "description": "【记忆】生成主动消息前，若记忆距上次刷新超过这么多分钟就先就地刷新一次（默认 30）。只靠每天 03:00 的话，白天发生的事最多滞后近 24 小时"
+    },
+    "memory_rewrite_stale": {
+      "type": "bool",
+      "default": true,
+      "description": "【记忆】某个会话近期没有新对话时，是否也把它的旧记忆按当前规则重新整理一遍（删掉已完成/已过期条目）。关闭则没新对话的会话旧记忆永远不变"
+    },
+    "memory_notes_enabled": {
+      "type": "bool",
+      "default": true,
+      "description": "【记忆】是否读取 AstrBot 工作区里用户手写的 user_profile.md 并优先注入。这是用户亲手写的事实源，比 AI 滚动摘要可靠，改了立刻生效"
+    },
+    "memory_notes_chars": {
+      "type": "int",
+      "default": 1200,
+      "description": "【记忆】用户笔记（user_profile.md）注入时的字数上限"
+    },
   "msg_count_min": {
     "type": "int",
     "default": 5,
