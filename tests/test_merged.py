@@ -912,6 +912,173 @@ async def main():
 
     pg._workspaces_dir, pg._cfg_int, pg._cfg_bool = _orig_ws, _orig_int, _orig_bool
     print("[21] 记忆四项病因（时间窗/用户笔记/冷却刷新/重置走KV）OK")
+
+    # [22] 计划与记忆的时间错位（2026-10-20）
+    # 症状：记忆 03:00 已写「卡已领」，今天的计划是昨天用旧记忆预生成的，
+    # 于是白天还在提醒去领卡。三道防线：水位比对 / 发送前事实校验 / 重建今日残留。
+    _today = datetime.datetime.now().strftime("%Y-%m-%d")
+    _now_hhmm = datetime.datetime.now().strftime("%H:%M")
+    _schema = json.load(open(_schema_path, encoding="utf-8"))
+    for _k in ("memory_refresh_before_gen", "dispatch_fact_check",
+               "dispatch_regenerate_on_memory_change"):
+        assert _k in _schema, f"配置缺键 {_k}"
+    assert _schema["gen_time"]["default"] == "20 3 * * *", _schema["gen_time"]
+    assert "{message}" in mod.FACT_CHECK_PROMPT and "{memory}" in mod.FACT_CHECK_PROMPT
+
+    _saved = {}
+    for _n in ("_cfg_bool", "_cfg_int", "_llm_chat", "_collect_memory",
+               "_collect_target_sessions", "_send_silent", "_generate_with_subagents",
+               "refresh_memory", "_ensure_schedule", "_regenerate_today_if_stale"):
+        _saved[_n] = getattr(pg, _n)
+    _flags = {
+        "pg_enabled": True,
+        "memory_enabled": True,
+        "memory_refresh_before_gen": True,
+        "dispatch_fact_check": True,
+        "dispatch_regenerate_on_memory_change": True,
+        "subagent_enabled": False,
+    }
+    pg._cfg_bool = lambda k, d=True: _flags.get(k, d)
+    pg._cfg_int = lambda k, d=0: d
+
+    _sent = []
+
+    async def _send_stub(text, targets):
+        _sent.append(text)
+
+    pg._send_silent = _send_stub
+
+    async def _targets1():
+        return ["umo1"]
+
+    pg._collect_target_sessions = _targets1
+
+    async def _mem_empty():
+        return ""
+
+    async def _mem_card():
+        return "用户笔记：万事达卡已于 2026-10-17 在城里领回。"
+
+    # 22a) 生成时把「基于哪一版记忆」写进计划（水位）
+    _kv["memory_store"] = {"updated": "2026-10-20 03:00", "items": [], "merged": ""}
+    pg._collect_memory = _mem_empty
+
+    async def _gen_one(prompt):
+        return '[{"time":"08:00","text":"早上好"}]'
+
+    pg._llm_chat = _gen_one
+    await pg._generate_and_store(_today, times=["08:00"])
+    assert _kv["daily_plan"]["memory_updated"] == "2026-10-20 03:00", _kv["daily_plan"]
+    assert [i["time"] for i in _kv["daily_plan"]["items"]] == ["08:00"]
+
+    # 22b) 记忆比计划新 => 发送前拿最新记忆校验，冲突则改写
+    _kv["memory_store"]["updated"] = "2026-10-20 12:00"
+    _kv["daily_plan"] = {
+        "date": _today,
+        "memory_updated": "2026-10-20 03:00",
+        "items": [{"time": _now_hhmm, "text": "记得去领万事达卡"}],
+    }
+    pg._collect_memory = _mem_card
+    _seen = []
+
+    async def _check_rewrite(prompt):
+        _seen.append(prompt)
+        return '{"conflict": true, "reason": "卡已领", "rewritten": "训练辛苦啦，记得多喝水"}'
+
+    pg._llm_chat = _check_rewrite
+    _sent.clear()
+    await pg._dispatch_due()
+    assert _sent == ["训练辛苦啦，记得多喝水"], _sent
+    assert _kv["daily_plan"]["items"] == [], _kv["daily_plan"]
+    assert _kv["daily_plan"]["memory_updated"] == "2026-10-20 12:00"
+    assert "待发送的消息" in _seen[0] and "万事达卡" in _seen[0], _seen[0][:200]
+
+    # 22c) 冲突且无法改写 => 丢弃，不发送
+    _kv["daily_plan"] = {
+        "date": _today,
+        "memory_updated": "2026-10-20 03:00",
+        "items": [{"time": _now_hhmm, "text": "卡领了吗"}],
+    }
+
+    async def _check_drop(prompt):
+        return '{"conflict": true, "reason": "已领", "rewritten": ""}'
+
+    pg._llm_chat = _check_drop
+    _sent.clear()
+    await pg._dispatch_due()
+    assert _sent == [], _sent
+    assert _kv["daily_plan"]["items"] == [], _kv["daily_plan"]
+
+    # 22d) 不冲突 => 原文发送；LLM 挂了 => 也原文发送（不能因为校验失败整天不说话）
+    _kv["daily_plan"] = {
+        "date": _today,
+        "memory_updated": "2026-10-20 03:00",
+        "items": [{"time": _now_hhmm, "text": "军训累不累"}],
+    }
+
+    async def _check_ok(prompt):
+        return '{"conflict": false, "reason": "", "rewritten": ""}'
+
+    pg._llm_chat = _check_ok
+    _sent.clear()
+    await pg._dispatch_due()
+    assert _sent == ["军训累不累"], _sent
+
+    _kv["daily_plan"] = {
+        "date": _today,
+        "memory_updated": "2026-10-20 03:00",
+        "items": [{"time": _now_hhmm, "text": "军训累不累"}],
+    }
+
+    async def _check_boom(prompt):
+        raise RuntimeError("LLM 挂了")
+
+    pg._llm_chat = _check_boom
+    _sent.clear()
+    await pg._dispatch_due()
+    assert _sent == ["军训累不累"], _sent
+
+    # 22e) 今日计划基于旧记忆 => 重建「还没到点」的条目，时间点保持不变
+    _kv["memory_store"]["updated"] = "2026-10-20 12:00"
+    _kv["daily_plan"] = {
+        "date": _today,
+        "memory_updated": "2026-10-20 03:00",
+        "items": [{"time": "23:59", "text": "旧内容：提醒去领卡"}],
+    }
+
+    async def _gen_new(prompt):
+        return '[{"time":"23:59","text":"新内容：问问军训"}]'
+
+    pg._llm_chat = _gen_new
+    pg._collect_memory = _mem_empty
+    await pg._regenerate_today_if_stale()
+    assert _kv["daily_plan"]["items"][0]["text"].startswith("新内容"), _kv["daily_plan"]
+    assert _kv["daily_plan"]["items"][0]["time"] == "23:59", _kv["daily_plan"]
+    assert _kv["daily_plan"]["memory_updated"] == "2026-10-20 12:00"
+
+    # 22f) 生成时点顺序：先刷记忆 -> 再确保槽位 -> 最后重建今日残留
+    _order = []
+
+    async def _rf():
+        _order.append("refresh")
+        return ""
+
+    async def _ens(force=False):
+        _order.append("ensure")
+
+    async def _reg():
+        _order.append("regen")
+
+    pg.refresh_memory = _rf
+    pg._ensure_schedule = _ens
+    pg._regenerate_today_if_stale = _reg
+    await pg._on_gen_time()
+    assert _order == ["refresh", "ensure", "regen"], _order
+
+    for _n, _v in _saved.items():
+        setattr(pg, _n, _v)
+    print("[22] 计划/记忆时间错位（水位/发送前校验/重建今日残留）OK")
+
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
     print("[16] terminate() 完成，门禁已卸载")

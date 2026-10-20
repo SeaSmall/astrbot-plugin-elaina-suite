@@ -338,6 +338,30 @@ MEMORY_MERGE_PROMPT = """下面是同一个用户在不同会话里留下的记�
 # 记忆里出现这些开头的行 = 在描述助手自己，注入前直接丢掉（兜底，防止模型不听话）
 _MEMORY_SELF_SUBJECTS = ("助手", "ai", "你", "机器人", "bot", "assistant", "模型")
 
+# 发送前的事实复核：计划是提前生成的，记忆却随时可能更新，
+# 于是会出现「记忆里写着卡已领、消息还在提醒去领卡」。这条提示词只做一件事：
+# 拿最新记忆核对这一条待发消息，冲突就改写或丢弃。
+FACT_CHECK_PROMPT = """你要在一条主动关心消息**发出去之前**做最后核对。
+
+【最新记忆】
+{memory}
+
+【待发送的消息】
+{message}
+
+请判断这条消息是否与记忆矛盾，尤其是：
+- 提醒用户去做记忆里已经**完成**的事（最典型：卡已经领了还在提醒去领）
+- 描述与人设/记忆里的身份、地点、作息明显不符的状态
+- 把已经过期的安排当成还没发生
+
+只输出一个 JSON，不要任何解释：
+{{"conflict": true/false, "reason": "一句话原因", "rewritten": "改写后的消息"}}
+
+要求：
+- conflict 为 false 时：rewritten 留空字符串
+- conflict 为 true 时：如果这条消息改掉冲突部分后仍然值得发，就给出 rewritten（保持原本的语气、长度、口语风格，不要解释你改了什么）；如果整条消息的前提都不成立了，rewritten 留空字符串
+- 不要输出 JSON 以外的任何字符"""
+
 # ---------------------------------------------------------------------------
 # Elaina 表情包：默认配置（对齐原版 astrbot_plugin_Elaina_meme_Bridge）
 # ---------------------------------------------------------------------------
@@ -2688,7 +2712,8 @@ class ProactiveGuardCore(_PluginCoreBase):
     # 定时任务：每日生成 + 每分钟检查
     # ================================================================== #
     async def _setup_scheduler(self) -> None:
-        gen_cron = str(self.config.get("gen_time") or "0 6 * * *").strip()
+        # 默认 03:20：排在 03:00 的记忆刷新之后，保证「生成用的记忆」是刚刷过的
+        gen_cron = str(self.config.get("gen_time") or "20 3 * * *").strip()
         tz = str(self.config.get("pg_timezone") or "Asia/Shanghai").strip()
         cm = getattr(self.context, "cron_manager", None)
         if cm is not None and hasattr(cm, "add_basic_job"):
@@ -2800,8 +2825,28 @@ class ProactiveGuardCore(_PluginCoreBase):
             logger.error(f"[proactive_guard] 定时任务注册失败: {e}")
 
     async def _on_gen_time(self) -> None:
-        """到生成时间：确保今日计划存在、明日计划已预生成（后台静默）。"""
+        """到生成时间：先刷记忆 → 必要时重建今日剩余计划 → 再预生成明日计划。
+
+        顺序很重要：预生成机制下今天的计划是昨天写的，可能比记忆旧十几个小时。
+        所以这里先强制刷一次记忆（不靠 30 分钟冷却），再拿新记忆去校正今天还没发的那几条。
+        """
         try:
+            if self._cfg_bool("memory_enabled", True) and self._cfg_bool(
+                "memory_refresh_before_gen", True
+            ):
+                try:
+                    await self.refresh_memory()
+                except Exception as e:
+                    logger.warning(f"[proactive_guard] 生成前刷新记忆失败: {e}")
+            if self._cfg_bool("dispatch_regenerate_on_memory_change", True):
+                try:
+                    # 顺序：先把昨日预生成的那份提升为今日计划，再检查它是否基于旧记忆。
+                    # 反过来会漏：提升发生在检查之后，等于永远检查的是「昨天那份」。
+                    await self._ensure_schedule(force=False)
+                    await self._regenerate_today_if_stale()
+                    return
+                except Exception as e:
+                    logger.warning(f"[proactive_guard] 重建今日计划失败: {e}")
             await self._ensure_schedule(force=False)
         except Exception as e:
             logger.error(f"[proactive_guard] 生成计划失败: {e}", exc_info=True)
@@ -2869,18 +2914,26 @@ class ProactiveGuardCore(_PluginCoreBase):
                 self._last_gen_attempt = time.time()
                 await self._generate_and_store(target_date=tomorrow)
 
-    async def _generate_and_store(self, target_date: str) -> None:
+    async def _generate_and_store(
+        self, target_date: str, times: list[str] | None = None
+    ) -> None:
         """后台为指定日期生成计划并写入 KV 存储（静默，不通知用户）。
 
         目标日期为明天 -> 存 daily_plan_next（预生成）；
         目标日期为今天 -> 存 daily_plan（/重建今日计划 在窗口未结束时补今天的场景）。
+
+        times 显式给出时只用这些时间点（重建「今日剩余计划」时用来保留原有排期）。
         """
         today = datetime.now().strftime("%Y-%m-%d")
         slot = "daily_plan" if target_date == today else "daily_plan_next"
-        count = random.randint(
-            self._cfg_int("msg_count_min", 5), self._cfg_int("msg_count_max", 10)
-        )
-        times = self._random_times(count)
+        if times:
+            times = [self._normalize_time(str(t)) for t in times if str(t).strip()]
+            count = len(times)
+        else:
+            count = random.randint(
+                self._cfg_int("msg_count_min", 5), self._cfg_int("msg_count_max", 10)
+            )
+            times = self._random_times(count)
         time_list = "、".join(times)
         persona = await self._resolve_persona()
 
@@ -2925,7 +2978,17 @@ class ProactiveGuardCore(_PluginCoreBase):
                 f"[proactive_guard] 计划生成失败（{target_date}）：无法解析 LLM 输出，稍后重试"
             )
             return
-        await self.put_kv_data(slot, {"date": target_date, "items": items})
+        # 记录「这份计划是基于哪一版记忆生成的」。派发时会拿它和当前记忆比对，
+        # 不一致就说明记忆在生成之后又更新过，需要在发送前复核（见 _dispatch_due）。
+        memory_updated = await self._memory_updated()
+        await self.put_kv_data(
+            slot,
+            {
+                "date": target_date,
+                "items": items,
+                "memory_updated": memory_updated,
+            },
+        )
         logger.info(
             f"[proactive_guard] 计划已生成（{target_date}）：{len(items)} 条消息 "
             f"@ {time_list}（后台静默，记忆 {'有' if memory else '无'}，"
@@ -3072,7 +3135,13 @@ class ProactiveGuardCore(_PluginCoreBase):
 
     async def _dispatch_due(self) -> None:
         """只从 daily_plan（date==今天）派发：到点发送并删除该时间点；
-        错过在补偿窗口内补发，超窗丢弃；date<今天的旧计划静默丢弃（由 _ensure_schedule 清理）。"""
+        错过在补偿窗口内补发，超窗丢弃；date<今天的旧计划静默丢弃（由 _ensure_schedule 清理）。
+
+        发送前会做两道保护：
+        1. 记忆水位比对：计划的 memory_updated 与当前记忆不一致 => 记忆更新过，必须复核；
+        2. 逐条事实校验：拿最新记忆核对这一条消息，冲突则改写或丢弃。
+        这两道是给「预生成计划天然滞后」兜底的——计划可能比记忆旧十几小时。
+        """
         plan = await self._load_schedule("daily_plan")
         if not plan or not plan.get("items"):
             return
@@ -3096,15 +3165,128 @@ class ProactiveGuardCore(_PluginCoreBase):
         if not due and not removed:
             return
         targets = await self._collect_target_sessions()
+
+        # 记忆比生成计划时新了 => 计划内容可能已经过时
+        memory_updated = await self._memory_updated()
+        plan_watermark = str(plan.get("memory_updated") or "")
+        memory_changed = bool(memory_updated) and plan_watermark != memory_updated
+        fact_check = self._cfg_bool("dispatch_fact_check", True)
+        memory = ""
+        if fact_check or memory_changed:
+            memory = await self._collect_memory()
+        if memory_changed:
+            logger.info(
+                f"[proactive_guard] 记忆已更新（计划基于 {plan_watermark or '空'}，"
+                f"当前 {memory_updated}），发送前逐条复核"
+            )
+
         for it in due:
-            await self._send_silent(str(it.get("text", "")), targets)
+            text = str(it.get("text", ""))
+            if fact_check and memory:
+                checked = await self._fact_check_message(text, memory)
+                if not checked:
+                    removed.append(str(it.get("time", "")))
+                    logger.info(
+                        f"[proactive_guard] {it.get('time')} 的消息与最新记忆冲突，"
+                        f"已丢弃：{text[:60]!r}"
+                    )
+                    continue
+                text = checked
+            await self._send_silent(text, targets)
             removed.append(str(it.get("time", "")))
             logger.info(f"[proactive_guard] 已发送 {it.get('time')} 的消息并移除该时间点")
-        if removed:
+
+        if removed or memory_changed:
             plan["items"] = [
                 it for it in plan["items"] if str(it.get("time", "")) not in removed
             ]
+            if memory_updated:
+                plan["memory_updated"] = memory_updated
             await self.put_kv_data("daily_plan", plan)
+
+    async def _memory_updated(self) -> str:
+        """当前记忆库的更新时间（水位）。空表示还没有记忆。"""
+        store = await self._load_memory_store()
+        return str(store.get("updated") or "")
+
+    async def _fact_check_message(self, text: str, memory: str) -> str:
+        """发送前拿最新记忆复核一条待发消息。
+
+        返回可直接发送的文本（可能被改写）；返回空字符串表示这条应当丢弃。
+        LLM 调用失败时原样返回——宁可发出去，也不要因为校验挂了整天不说话。
+        """
+        text = str(text or "").strip()
+        if not text or not memory:
+            return text
+        try:
+            out = await self._llm_chat(
+                FACT_CHECK_PROMPT.format(message=text[:1500], memory=memory[:3000])
+            )
+        except Exception as e:
+            logger.warning(f"[proactive_guard] 发送前事实校验失败，按原文发送: {e}")
+            return text
+        data = None
+        for obj in _json_objects(_loose_llm_text(out, for_json=True)):
+            data = obj
+            break
+        if not isinstance(data, dict):
+            return text
+        conflict = data.get("conflict")
+        if isinstance(conflict, str):
+            conflict = conflict.strip().lower() in (
+                "true",
+                "1",
+                "yes",
+                "y",
+                "是",
+                "有",
+                "冲突",
+            )
+        if not conflict:
+            return text
+        reason = str(data.get("reason") or "").strip()
+        rewritten = self._clean_message(
+            str(data.get("rewritten") or data.get("rewrite") or "")
+        )
+        if rewritten:
+            logger.info(
+                f"[proactive_guard] 事实校验改写消息（{reason or '冲突'}）："
+                f"{text[:40]!r} -> {rewritten[:40]!r}"
+            )
+            return rewritten
+        return ""
+
+    async def _regenerate_today_if_stale(self) -> None:
+        """今日计划若是用旧记忆生成的，就按最新记忆重写「还没到点」的那些时间点。
+
+        预生成机制下今天的计划是昨天写的（最长滞后近两天），典型症状就是
+        记忆里已经写着「卡已领」，今天的消息仍在提醒去领卡。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        plan = await self._load_schedule("daily_plan")
+        if plan.get("date") != today or not plan.get("items"):
+            return
+        memory_updated = await self._memory_updated()
+        if not memory_updated:
+            return
+        if str(plan.get("memory_updated") or "") == memory_updated:
+            return
+        now_min = datetime.now().hour * 60 + datetime.now().minute
+        remaining = [
+            str(it.get("time", ""))
+            for it in plan["items"]
+            if self._hhmm_to_min(str(it.get("time", ""))) >= now_min
+        ]
+        if not remaining:
+            plan["memory_updated"] = memory_updated
+            await self.put_kv_data("daily_plan", plan)
+            return
+        async with self._gen_lock:
+            logger.info(
+                f"[proactive_guard] 记忆已更新（{memory_updated}），重建今日剩余 "
+                f"{len(remaining)} 条计划 @ {'、'.join(remaining)}"
+            )
+            await self._generate_and_store(target_date=today, times=remaining)
 
     # ------------------------------------------------------------------ #
     # 发送（绕过门禁，静默）

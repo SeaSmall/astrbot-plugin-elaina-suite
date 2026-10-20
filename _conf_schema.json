@@ -254,8 +254,8 @@
   },
   "gen_time": {
     "type": "string",
-    "default": "0 6 * * *",
-    "description": "【主动门禁/人格消息】每日计划生成时间（cron，默认每天 06:00）：确保「明天」的计划已预生成；计划缺失时任意时刻都会自动补种（20 分钟节流）"
+    "default": "20 3 * * *",
+    "description": "【主动门禁/人格消息】每日计划生成时间（cron，默认每天 03:20，排在 03:00 记忆刷新之后）：确保「明天」的计划已预生成；计划缺失时任意时刻都会自动补种（20 分钟节流）。改回 06:00 也可以，但生成用的记忆会旧 3 小时"
   },
   "pg_timezone": {
     "type": "string",
@@ -336,6 +336,21 @@
       "type": "int",
       "default": 1200,
       "description": "【记忆】用户笔记（user_profile.md）注入时的字数上限"
+    },
+    "memory_refresh_before_gen": {
+      "type": "bool",
+      "default": true,
+      "description": "【记忆】每天生成计划前先强制刷新一次记忆（不等 30 分钟冷却）。保证「生成计划时用的记忆」是最新的，而不是昨天的"
+    },
+    "dispatch_fact_check": {
+      "type": "bool",
+      "default": true,
+      "description": "【记忆】发送每条主动消息前，用最新记忆做一次事实校验：与记忆冲突（例如提醒去做已经做完的事）时改写或丢弃。每天 5~10 次额外轻量 LLM 调用"
+    },
+    "dispatch_regenerate_on_memory_change": {
+      "type": "bool",
+      "default": true,
+      "description": "【记忆】生成计划时若发现今天的计划是基于旧记忆写的，就按最新记忆重写今天还没到点的那些条目（不改时间点，只改内容）"
     },
   "msg_count_min": {
     "type": "int",
