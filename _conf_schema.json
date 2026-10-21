@@ -264,94 +264,110 @@
   },
   "message_prompt": {
     "type": "text",
-    "default": "你是{persona}\n今天是{date}。请在下面给出的 {count} 个时间点，分别给用户写一条简短消息（20~60字），要求：\n1. 每条消息要贴合对应时间点的场景（早晨问候、上午加油、中午提醒休息吃饭、下午闲聊、傍晚关心、晚上问候、睡前道晚安等）\n2. 每条内容必须不同，风格自然口语化，像真人朋友随手发的一条\n3. 只输出一个 JSON 数组，格式：[{\"time\": \"07:35\", \"text\": \"消息内容\"}, ...]\n4. 不要输出 JSON 以外的任何文字\n时间点：{time_list}",
+    "default": "{persona}{world_block}\n今天是{date}。请在下面 {count} 个时间点，各写一条你主动发给用户的简短消息（20~60字）。\n要求：\n1. 大部分（约 {share_ratio}%）写**你自己正在经历的事**：此刻在做什么、去了哪里、遇到谁、看到什么、心情如何；要具体、有画面感，符合上面的【世界观设定】（若已配置）与你的身份\n2. 其余写**对用户的关心**：接着他最近在做的事（军训、作业、熬夜、身体不舒服…）具体问一句或提醒一句，不要「吃了吗」「多喝水」这类模板话\n3. 每条贴合对应时间点（早晨/上午/中午/下午/傍晚/晚上/睡前），但不要写成定时问候模板\n4. 每条内容必须不同，第一人称，自然口语化\n5. 只输出一个 JSON 数组，格式：[{\"time\": \"07:35\", \"text\": \"消息内容\"}, ...]\n6. 不要输出 JSON 以外的任何文字\n时间点：{time_list}",
     "description": "【主动门禁/人格消息】写消息的提示词模板（{persona} 自动替换为 AstrBot 当前人格设定，{date} {time_list} {count} 自动替换）"
   },
-    "subagent_enabled": {
-      "type": "bool",
-      "default": true,
-      "description": "【子代理生成】用「规划 -> 并行写手 -> 审校」三个子代理协作产出每日消息，而不是单次 LLM 一把梭：每个时间点由独立写手成文（上下文更小、不易串味），再由审校代理统一语气与去重。关闭则回退 v1.0.x 的单次调用"
-    },
-    "subagent_parallel": {
-      "type": "bool",
-      "default": true,
-      "description": "【子代理生成】写手代理是否并行执行（受 subagent_concurrency 限流）。关闭则逐个串行生成，更慢但更省 API 并发额度"
-    },
-    "subagent_concurrency": {
-      "type": "int",
-      "default": 3,
-      "description": "【子代理生成】写手代理最大并发数（建议 2~5；过高可能触发 LLM 服务商限流）"
-    },
-    "subagent_review": {
-      "type": "bool",
-      "default": true,
-      "description": "【子代理生成】是否启用审校代理（统一语气、去重、修正与时间点不符的内容）。关闭则直接使用写手原稿，少一次 LLM 调用"
-    },
-    "memory_enabled": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】内置记忆系统：定时让 AI 把近期真实对话总结成「长期记忆要点」存入记忆库，生成主动消息时读出来注入提示词，让 AI 记得用户是谁、在做什么、聊过什么，而不是每天凭空寒暄"
-    },
-    "memory_cron": {
-      "type": "string",
-      "default": "0 3 * * *",
-      "description": "【记忆】记忆总结时间（cron，默认每天 03:00）：把「旧摘要 + 新对话」交给 AI 滚动重写成最新记忆。记忆库为空时，生成每日计划前也会就地总结一次"
-    },
-    "memory_turns": {
-      "type": "int",
-      "default": 20,
-      "description": "【记忆】每次总结时读取的历史消息条数（取最近的 N 条，含用户与 AI 双方）"
-    },
-    "memory_max_chars": {
-      "type": "int",
-      "default": 1500,
-      "description": "【记忆】记忆文本的最大字符数（既是总结输出的字数上限，也是注入提示词时的长度上限，超出保留最近部分）"
-    },
-    "memory_raw_fallback": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】记忆库为空且 AI 总结失败时，是否退回注入未总结的原始对话历史（更省事但更杂、更费 token）。关闭则没有记忆就直接空着"
-    },
-    "memory_window_hours": {
-      "type": "int",
-      "default": 48,
-      "description": "【记忆】总结时按时间窗取对话（小时）。0 = 只按 memory_turns 数条数。按时间取能保证「昨天说已经做完的事」一定在窗口内，不会因为消息条数被挤出而让旧待办一直留着"
-    },
-    "memory_refresh_cooldown": {
-      "type": "int",
-      "default": 30,
-      "description": "【记忆】生成主动消息前，若记忆距上次刷新超过这么多分钟就先就地刷新一次（默认 30）。只靠每天 03:00 的话，白天发生的事最多滞后近 24 小时"
-    },
-    "memory_rewrite_stale": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】某个会话近期没有新对话时，是否也把它的旧记忆按当前规则重新整理一遍（删掉已完成/已过期条目）。关闭则没新对话的会话旧记忆永远不变"
-    },
-    "memory_notes_enabled": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】是否读取 AstrBot 工作区里用户手写的 user_profile.md 并优先注入。这是用户亲手写的事实源，比 AI 滚动摘要可靠，改了立刻生效"
-    },
-    "memory_notes_chars": {
-      "type": "int",
-      "default": 1200,
-      "description": "【记忆】用户笔记（user_profile.md）注入时的字数上限"
-    },
-    "memory_refresh_before_gen": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】每天生成计划前先强制刷新一次记忆（不等 30 分钟冷却）。保证「生成计划时用的记忆」是最新的，而不是昨天的"
-    },
-    "dispatch_fact_check": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】发送每条主动消息前，用最新记忆做一次事实校验：与记忆冲突（例如提醒去做已经做完的事）时改写或丢弃。每天 5~10 次额外轻量 LLM 调用"
-    },
-    "dispatch_regenerate_on_memory_change": {
-      "type": "bool",
-      "default": true,
-      "description": "【记忆】生成计划时若发现今天的计划是基于旧记忆写的，就按最新记忆重写今天还没到点的那些条目（不改时间点，只改内容）"
-    },
+  "world_setting": {
+    "type": "text",
+    "default": "",
+    "description": "【主动门禁/人格消息】世界观/场景设定：角色所处的世界、身份、环境（例如「你是旅行中的魔女，正坐火车前往下一个国家」）。留空则只按人格设定生成。",
+    "hint": "越具体越好：地点、时代、正在发生的事、你的处境。主动消息里的「分享自己经历」会围绕这里展开。"
+  },
+  "self_share_ratio": {
+    "type": "int",
+    "default": 70,
+    "description": "【主动门禁/人格消息】自我分享占比（0~100，默认 70）：主动消息里有多少比例是分享你自己的经历见闻，其余是关心用户。两类都会保留，关心类至少 1 条。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 5
+    }
+  },
+  "subagent_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【子代理生成】用「规划 -> 并行写手 -> 审校」三个子代理协作产出每日消息，而不是单次 LLM 一把梭：每个时间点由独立写手成文（上下文更小、不易串味），再由审校代理统一语气与去重。关闭则回退 v1.0.x 的单次调用"
+  },
+  "subagent_parallel": {
+    "type": "bool",
+    "default": true,
+    "description": "【子代理生成】写手代理是否并行执行（受 subagent_concurrency 限流）。关闭则逐个串行生成，更慢但更省 API 并发额度"
+  },
+  "subagent_concurrency": {
+    "type": "int",
+    "default": 3,
+    "description": "【子代理生成】写手代理最大并发数（建议 2~5；过高可能触发 LLM 服务商限流）"
+  },
+  "subagent_review": {
+    "type": "bool",
+    "default": true,
+    "description": "【子代理生成】是否启用审校代理（统一语气、去重、修正与时间点不符的内容）。关闭则直接使用写手原稿，少一次 LLM 调用"
+  },
+  "memory_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】内置记忆系统：定时让 AI 把近期真实对话总结成「长期记忆要点」存入记忆库，生成主动消息时读出来注入提示词，让 AI 记得用户是谁、在做什么、聊过什么，而不是每天凭空寒暄"
+  },
+  "memory_cron": {
+    "type": "string",
+    "default": "0 3 * * *",
+    "description": "【记忆】记忆总结时间（cron，默认每天 03:00）：把「旧摘要 + 新对话」交给 AI 滚动重写成最新记忆。记忆库为空时，生成每日计划前也会就地总结一次"
+  },
+  "memory_turns": {
+    "type": "int",
+    "default": 20,
+    "description": "【记忆】每次总结时读取的历史消息条数（取最近的 N 条，含用户与 AI 双方）"
+  },
+  "memory_max_chars": {
+    "type": "int",
+    "default": 1500,
+    "description": "【记忆】记忆文本的最大字符数（既是总结输出的字数上限，也是注入提示词时的长度上限，超出保留最近部分）"
+  },
+  "memory_raw_fallback": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】记忆库为空且 AI 总结失败时，是否退回注入未总结的原始对话历史（更省事但更杂、更费 token）。关闭则没有记忆就直接空着"
+  },
+  "memory_window_hours": {
+    "type": "int",
+    "default": 48,
+    "description": "【记忆】总结时按时间窗取对话（小时）。0 = 只按 memory_turns 数条数。按时间取能保证「昨天说已经做完的事」一定在窗口内，不会因为消息条数被挤出而让旧待办一直留着"
+  },
+  "memory_refresh_cooldown": {
+    "type": "int",
+    "default": 30,
+    "description": "【记忆】生成主动消息前，若记忆距上次刷新超过这么多分钟就先就地刷新一次（默认 30）。只靠每天 03:00 的话，白天发生的事最多滞后近 24 小时"
+  },
+  "memory_rewrite_stale": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】某个会话近期没有新对话时，是否也把它的旧记忆按当前规则重新整理一遍（删掉已完成/已过期条目）。关闭则没新对话的会话旧记忆永远不变"
+  },
+  "memory_notes_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】是否读取 AstrBot 工作区里用户手写的 user_profile.md 并优先注入。这是用户亲手写的事实源，比 AI 滚动摘要可靠，改了立刻生效"
+  },
+  "memory_notes_chars": {
+    "type": "int",
+    "default": 1200,
+    "description": "【记忆】用户笔记（user_profile.md）注入时的字数上限"
+  },
+  "memory_refresh_before_gen": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】每天生成计划前先强制刷新一次记忆（不等 30 分钟冷却）。保证「生成计划时用的记忆」是最新的，而不是昨天的"
+  },
+  "dispatch_fact_check": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】发送每条主动消息前，用最新记忆做一次事实校验：与记忆冲突（例如提醒去做已经做完的事）时改写或丢弃。每天 5~10 次额外轻量 LLM 调用"
+  },
+  "dispatch_regenerate_on_memory_change": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】生成计划时若发现今天的计划是基于旧记忆写的，就按最新记忆重写今天还没到点的那些条目（不改时间点，只改内容）"
+  },
   "msg_count_min": {
     "type": "int",
     "default": 5,

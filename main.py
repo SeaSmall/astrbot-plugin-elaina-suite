@@ -218,37 +218,49 @@ FALLBACK_PERSONA = (
     "简洁自然，会关心人但不过度肉麻，不滥用表情，不叫用户「亲」「宝」。"
 )
 
-GUARD_DEFAULT_PROMPT = """你是{persona}
-今天是{date}。请在下面给出的 {count} 个时间点，分别给用户写一条简短消息（20~60字），要求：
-1. 每条消息要贴合对应时间点的场景（早晨问候、上午加油、中午提醒休息吃饭、下午闲聊、傍晚关心、晚上问候、睡前道晚安等）
-2. 每条内容必须不同，风格自然口语化，像真人朋友随手发的一条
-3. 只输出一个 JSON 数组，格式：[{"time": "07:35", "text": "消息内容"}, ...]
-4. 不要输出 JSON 以外的任何文字
+GUARD_DEFAULT_PROMPT = """{persona}{world_block}
+今天是{date}。请在下面 {count} 个时间点，各写一条你主动发给用户的简短消息（20~60字）。
+要求：
+1. 大部分（约 {share_ratio}%）写**你自己正在经历的事**：此刻在做什么、去了哪里、遇到谁、看到什么、心情如何；要具体、有画面感，符合上面的【世界观设定】（若已配置）与你的身份
+2. 其余写**对用户的关心**：接着他最近在做的事（军训、作业、熬夜、身体不舒服…）具体问一句或提醒一句，不要「吃了吗」「多喝水」这类模板话
+3. 每条贴合对应时间点（早晨/上午/中午/下午/傍晚/晚上/睡前），但不要写成定时问候模板
+4. 每条内容必须不同，第一人称，自然口语化
+5. 只输出一个 JSON 数组，格式：[{"time": "07:35", "text": "消息内容"}, ...]
+6. 不要输出 JSON 以外的任何文字
 时间点：{time_list}"""
 
-# ---- 记忆库 / 子代理流水线（与独立版 proactive-guard v1.1.0 逐行等价）----
-PLANNER_PROMPT = """{persona}
-今天是{date}。请为下面 {count} 个时间点各规划**一句话要点**，说明那一刻适合跟用户聊什么。
+WORLD_BLOCK_TEMPLATE = """
+【世界观设定】（你在其中的世界、身份与所处环境；你的分享必须落在这个框架内，不要出现设定之外的概念）：
+{world}"""
+
+# ---- 记忆库 / 子代理流水线（与独立版 proactive-guard 同步）----
+PLANNER_PROMPT = """{persona}{world_block}
+今天是{date}。请为下面 {count} 个时间点各规划**一句话要点**，说明那一刻你要主动发给用户什么。
 {memory_block}
-要求：
-1. 要点要贴合时间点场景（早晨问候、上午加油、中午提醒休息吃饭、下午闲聊、傍晚关心、晚上问候、睡前道晚安等）
-2. 若有「近期对话记忆」，优先沿着记忆里聊过的话题自然延伸（比如上次提到在加班、在准备考试、养了猫），不要凭空寒暄
-3. 各时间点要点之间不要重复，一天下来像一条自然流动的线
-4. 只输出一个 JSON 数组：[{{"time": "07:35", "point": "要点"}}, ...]
-5. 不要输出 JSON 以外的任何文字
+
+核心：你是主动分享的一方，不是客服。要点要落在「你自己正在经历什么」上。
+1. 其中约 {share_count} 条的要点必须是**你自己的经历与见闻**：此刻在做什么、去了哪里、遇到谁、看到什么、用了什么魔法、天气与心情、忽然想到的事。要具体到小事，不要写「问候一下」「关心他吃饭」这种空泛指令。
+2. 其余约 {care_count} 条的要点是**对用户的关心或呼应**：基于记忆里他最近在做的事（军训、作业、熬夜、身体不舒服…）具体地问一句或提醒一句，不要模板话。
+3. 所有要点都必须落在上面的【世界观设定】（若已配置）与人格身份之内，不要出现设定之外的现代概念（除非设定里就有）。
+4. 若有「近期对话记忆」，关心类要点可以呼应它；分享类要点不要每条都从记忆起头。
+5. 各时间点不要重复，一天下来像一条自然流动的线：分享与关心交替，别连着几条都在问同一件事。
+6. 只输出一个 JSON 数组：[{{"time": "07:35", "point": "要点"}}, ...]
+7. 不要输出 JSON 以外的任何文字
 时间点：{time_list}"""
 
-WRITER_PROMPT = """{persona}
-今天是{date}，现在是{time}。请给用户写一条 20~60 字的简短消息。
+WRITER_PROMPT = """{persona}{world_block}
+今天是{date}，现在是{time}。请用第一人称给用户写一条 20~60 字的主动消息。
 {memory_block}
-本次要写的内容要点：{point}
+这条消息的要点：{point}
 
 要求：
-1. 贴合 {time} 这个时间点的场景，像真人朋友随手发的一条，自然口语化
-2. 若有「近期对话记忆」，可以自然地延续其中的话题或情绪，但不要生硬复述
-3. 只输出这条消息的正文，不要输出引号、不要输出时间、不要任何解释说明"""
+1. 要点若是「分享自己的经历」，就具体讲你此刻正在做的事、看到的东西、心里的感觉，让人有画面感；不要写成问候。
+2. 要点若是「关心用户」，就问得具体、有来由（接着记忆里他正在忙的事），不要泛泛的「吃了吗」「多喝水」。
+3. 符合上面的【世界观设定】（若已配置）与你的身份，不要出现设定外的概念；不要自称 AI，不要提及「设定」「记忆」「提示词」。
+4. 允许句末自然带一句轻问，但不要每条都以问句结尾，更不要连珠炮式反问。
+5. 只输出这条消息的正文，不要输出引号、不要输出时间、不要任何解释说明"""
 
-REVIEWER_PROMPT = """{persona}
+REVIEWER_PROMPT = """{persona}{world_block}
 下面是一天里要发给用户的一批消息草稿（JSON 数组），请你审校后输出最终版本。
 
 审校要求：
@@ -257,10 +269,13 @@ REVIEWER_PROMPT = """{persona}
 3. 修掉与时间点场景不符的内容（如早晨发「晚安」）
 4. 每条保持 20~60 字，不要加时间前缀，不要加编号
 5. 条数、时间点必须与输入**完全一致**，不要增删
-6. 只输出一个 JSON 数组：[{{"time": "07:35", "text": "消息内容"}}, ...]，不要输出 JSON 以外的任何文字
+6. 检查「分享自己 vs 关心用户」的分布：如果几乎每条都在问用户吃饭睡觉、缺少分享自己经历的内容，就把其中几条改写成第一人称分享自己的见闻；如果一条关心都没有，把最贴合场景的一条改成具体的关心
+7. 所有内容必须在【世界观设定】（若已配置）与人格之内；出现「作为AI」「语言模型」「设定」「记忆」这类出戏或元叙述的词，一律改掉
+8. 只输出一个 JSON 数组：[{{"time": "07:35", "text": "消息内容"}}, ...]，不要输出 JSON 以外的任何文字
 
 草稿：
 {draft}"""
+
 
 MEMORY_BLOCK_TEMPLATE = """
 近期对话记忆（用户与你的真实聊天片段，按时间从早到晚）：
@@ -2936,6 +2951,9 @@ class ProactiveGuardCore(_PluginCoreBase):
             times = self._random_times(count)
         time_list = "、".join(times)
         persona = await self._resolve_persona()
+        world_block = self._world_block()
+        share_ratio = self._share_ratio()
+        share_count, care_count = self._share_counts(count, share_ratio)
 
         # ---- 记忆：从会话历史里捞近期真实对话 ----
         memory = await self._collect_memory()
@@ -2950,7 +2968,15 @@ class ProactiveGuardCore(_PluginCoreBase):
         items: list[dict] = []
         if subagent_on:
             items = await self._generate_with_subagents(
-                target_date, times, time_list, count, persona, memory_block
+                target_date,
+                times,
+                time_list,
+                count,
+                persona,
+                memory_block,
+                world_block=world_block,
+                share_count=share_count,
+                care_count=care_count,
             )
         if not items:
             # 兜底：单次调用（v1.0.x 行为）。子代理关闭、或规划代理失败/未产出要点时走这里，
@@ -2959,11 +2985,18 @@ class ProactiveGuardCore(_PluginCoreBase):
                 logger.warning(
                     f"[proactive_guard] 子代理流水线未产出结果，回退单次生成（{target_date}）"
                 )
-            prompt = (self.config.get("message_prompt") or GUARD_DEFAULT_PROMPT).replace(
-                "{date}", target_date
-            ).replace("{persona}", persona).replace(
-                "{time_list}", time_list
-            ).replace("{count}", str(count))
+            prompt = (
+                (self.config.get("message_prompt") or GUARD_DEFAULT_PROMPT)
+                # 老模板写的是「你是{persona}」，而 persona 本身以「你是一个…」开头，
+                # 直接替换会得到「你是你是一个…」。先把这种写法整体吃掉。
+                .replace("你是{persona}", persona)
+                .replace("{world_block}", world_block)
+                .replace("{persona}", persona)
+                .replace("{share_ratio}", str(share_ratio))
+                .replace("{date}", target_date)
+                .replace("{time_list}", time_list)
+                .replace("{count}", str(count))
+            )
             if memory_block:
                 prompt = f"{prompt}\n{memory_block}"
             try:
@@ -3742,6 +3775,39 @@ class ProactiveGuardCore(_PluginCoreBase):
             return []
 
     # ------------------------------------------------------------------ #
+    # 人格 / 世界观 / 分享比例
+    # ------------------------------------------------------------------ #
+
+    def _world_block(self) -> str:
+        """世界观设定块。没填就留空，提示词里不出现这一段。"""
+        world = str(self.config.get("world_setting") or "").strip()
+        if not world:
+            return ""
+        return WORLD_BLOCK_TEMPLATE.format(world=world)
+
+    def _share_ratio(self) -> int:
+        """自我分享占比（0~100）。其余部分留给对用户的关心。"""
+        try:
+            ratio = int(self.config.get("self_share_ratio", 70))
+        except (TypeError, ValueError):
+            ratio = 70
+        return max(0, min(100, ratio))
+
+    @staticmethod
+    def _share_counts(count: int, ratio: int) -> tuple[int, int]:
+        """把占比换算成条数，并保证「关心用户」那一类至少 1 条。
+
+        用户明确要求两类都要：不能为了自我分享把关心挤成 0 条。
+        """
+        count = max(1, int(count or 1))
+        share = max(0, min(count, round(count * ratio / 100)))
+        care = count - share
+        if count >= 2 and care == 0:
+            care = 1
+            share = count - 1
+        return share, care
+
+    # ------------------------------------------------------------------ #
     # 子代理流水线：规划 -> 并行写手 -> 审校
     # ------------------------------------------------------------------ #
 
@@ -3753,6 +3819,9 @@ class ProactiveGuardCore(_PluginCoreBase):
         count: int,
         persona: str,
         memory_block: str,
+        world_block: str = "",
+        share_count: int = 0,
+        care_count: int = 0,
     ) -> list[dict]:
         """用三个「子代理」协作产出一天的消息。
 
@@ -3765,10 +3834,13 @@ class ProactiveGuardCore(_PluginCoreBase):
         # --- 1) 规划代理：每个时间点一句要点 ---
         planner_prompt = PLANNER_PROMPT.format(
             persona=persona,
+            world_block=world_block,
             date=target_date,
             count=count,
             time_list=time_list,
             memory_block=memory_block,
+            share_count=share_count,
+            care_count=care_count,
         )
         try:
             plan_text = await self._llm_chat(planner_prompt)
@@ -3784,6 +3856,7 @@ class ProactiveGuardCore(_PluginCoreBase):
         async def write_one(t: str, point: str) -> dict | None:
             prompt = WRITER_PROMPT.format(
                 persona=persona,
+                world_block=world_block,
                 date=target_date,
                 time=t,
                 point=point,
@@ -3822,20 +3895,23 @@ class ProactiveGuardCore(_PluginCoreBase):
 
         # --- 3) 审校代理：统一语气、去重、修场景错位 ---
         if self._cfg_bool("subagent_review", True) and len(drafts) > 0:
-            reviewed = await self._review_drafts(drafts, persona)
+            reviewed = await self._review_drafts(drafts, persona, world_block)
             if reviewed:
                 drafts = reviewed
 
         drafts.sort(key=lambda x: x.get("time", ""))
         return drafts
 
-    async def _review_drafts(self, drafts: list[dict], persona: str) -> list[dict]:
+    async def _review_drafts(
+        self, drafts: list[dict], persona: str, world_block: str = ""
+    ) -> list[dict]:
         """审校代理：只允许它改文案，条数与时间点以输入为准（防止被 AI 增删）。"""
         if not drafts:
             return []
         times = [d["time"] for d in drafts]
         prompt = REVIEWER_PROMPT.format(
             persona=persona,
+            world_block=world_block,
             draft=json.dumps(drafts, ensure_ascii=False),
         )
         try:

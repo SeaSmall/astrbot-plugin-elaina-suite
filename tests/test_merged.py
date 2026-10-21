@@ -614,7 +614,7 @@ async def main():
     # 18d) _generate_and_store：记忆进子代理 + 规划失败时真的回退单次调用
     pg._random_times = lambda n: ["07:35"]
 
-    async def _subagents_fail(date, times, time_list, count, persona, memory_block):
+    async def _subagents_fail(date, times, time_list, count, persona, memory_block, **kw):
         _seen["sub_block"] = memory_block
         return []          # 模拟规划代理失败
 
@@ -632,7 +632,7 @@ async def main():
     _plan = await pg.get_kv_data("daily_plan_next", None)
     assert _plan and _plan["date"] == "2099-01-01" and _plan["items"], _plan
 
-    async def _subagents_ok(date, times, time_list, count, persona, memory_block):
+    async def _subagents_ok(date, times, time_list, count, persona, memory_block, **kw):
         return [{"time": "07:35", "text": "子代理写的"}]
 
     pg._generate_with_subagents = _subagents_ok
@@ -1078,6 +1078,57 @@ async def main():
     for _n, _v in _saved.items():
         setattr(pg, _n, _v)
     print("[22] 计划/记忆时间错位（水位/发送前校验/重建今日残留）OK")
+
+    # 23) 人格/世界观驱动的自我分享（v1.1.6）
+    assert pg._share_counts(10, 70) == (7, 3), pg._share_counts(10, 70)
+    assert pg._share_counts(10, 100) == (9, 1), "关心类必须至少保留 1 条"
+    assert pg._share_counts(1, 100) == (1, 0)
+    assert pg._share_counts(5, 0) == (0, 5)
+
+    pl.config["world_setting"] = ""
+    assert pg._world_block() == "", "没填世界观时不应产生空标题块"
+    pl.config["world_setting"] = "你是旅行中的魔女，正坐火车去下一个国家。"
+    _wb = pg._world_block()
+    assert "坐火车" in _wb and "【世界观设定】" in _wb, _wb
+
+    for _p in (
+        mod.PLANNER_PROMPT,
+        mod.WRITER_PROMPT,
+        mod.REVIEWER_PROMPT,
+        mod.GUARD_DEFAULT_PROMPT,
+    ):
+        assert "{world_block}" in _p, "提示词缺少世界观占位"
+
+    _wr = mod.WRITER_PROMPT.format(
+        persona="你是一个魔女。",
+        world_block=_wb,
+        date="2099-01-03",
+        time="09:00",
+        point="分享路上看到的风景",
+        memory_block="",
+    )
+    assert "坐火车" in _wr and "分享路上看到的风景" in _wr, _wr
+    assert "你的分享必须落在这个框架内" not in mod.WRITER_PROMPT.format(
+        persona="你是一个魔女。",
+        world_block="",
+        date="2099-01-03",
+        time="09:00",
+        point="随手发一条",
+        memory_block="",
+    ), "世界观留空时不应拼出空标题块"
+
+    _pl = mod.PLANNER_PROMPT.format(
+        persona="你是一个魔女。",
+        world_block=_wb,
+        date="2099-01-03",
+        count=6,
+        time_list="07:35、12:00",
+        memory_block="",
+        share_count=4,
+        care_count=2,
+    )
+    assert "4" in _pl and "2" in _pl and "【世界观设定】" in _pl, _pl
+    print("[23] 人格/世界观驱动的自我分享（分享比例/世界观块/提示词）OK")
 
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
