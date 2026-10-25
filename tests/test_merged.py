@@ -1130,6 +1130,215 @@ async def main():
     assert "4" in _pl and "2" in _pl and "【世界观设定】" in _pl, _pl
     print("[23] 人格/世界观驱动的自我分享（分享比例/世界观块/提示词）OK")
 
+    # 24) 新增板块：AI 界的新变化 + 网安漏洞与情报（v1.1.7）
+    _sec_by_feed = {x[1]: x for x in mod.SECTIONS}
+    assert "feeds_ai" in _sec_by_feed and "feeds_security" in _sec_by_feed
+    assert _sec_by_feed["feeds_ai"][2] == "AI 界的新变化", _sec_by_feed["feeds_ai"]
+    assert _sec_by_feed["feeds_security"][2] == "网安漏洞与情报"
+    assert _sec_by_feed["feeds_ai"][3] == "🤖"
+    assert _sec_by_feed["feeds_security"][3] == "🛡️"
+    _feed_order = [x[1] for x in mod.SECTIONS]
+    assert (
+        _feed_order.index("feeds_tech")
+        < _feed_order.index("feeds_ai")
+        < _feed_order.index("feeds_security")
+        < _feed_order.index("feeds_medical")
+    ), _feed_order
+    assert mod.DEFAULT_FEEDS["feeds_ai"] == [
+        "https://www.qbitai.com/feed",
+        "https://www.infoq.cn/feed",
+    ], mod.DEFAULT_FEEDS["feeds_ai"]
+    assert "cisa:kev" in mod.DEFAULT_FEEDS["feeds_security"]
+    assert "freebuf.com" in " ".join(mod.DEFAULT_FEEDS["feeds_security"])
+    assert dd._is_json_source("cisa:kev") is True
+    assert "cisa:kev" in mod.KEV_SOURCES
+
+    # 24a) cisa:kev 解析：7 天窗口 / 勒索标记 / nvd 链接 / 6 小时缓存 / 失败隔离
+    _now = datetime.datetime.now().astimezone()
+    _d = lambda n: (_now - datetime.timedelta(days=n)).strftime("%Y-%m-%d")
+
+    def _kev_payload():
+        return json.dumps({
+            "title": "CISA KEV",
+            "vulnerabilities": [
+                {"cveID": "CVE-2099-0001", "vendorProject": "Acme", "product": "Router",
+                 "vulnerabilityName": "命令注入", "dateAdded": _d(1),
+                 "shortDescription": "Acme 路由器存在命令注入，可远程执行任意命令。",
+                 "knownRansomwareCampaignUse": "Known"},
+                {"cveID": "CVE-2099-0002", "vendorProject": "Beta", "product": "Panel",
+                 "vulnerabilityName": "未授权访问", "dateAdded": _d(5),
+                 "shortDescription": "Beta 面板缺少鉴权。",
+                 "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2099-0003", "vendorProject": "Gamma", "product": "Old",
+                 "vulnerabilityName": "越界写", "dateAdded": _d(30),
+                 "shortDescription": "太老了，应被窗口过滤掉。",
+                 "knownRansomwareCampaignUse": "Unknown"},
+            ],
+        }).encode("utf-8")
+
+    _orig_hgb = dd._http_get_bytes
+    _calls = {"n": 0}
+
+    def _fake_hgb(url, *a, **k):
+        _calls["n"] += 1
+        assert "known_exploited_vulnerabilities.json" in url, url
+        return _kev_payload()
+
+    pl.config["security_kev_days"] = 7
+    dd._http_get_bytes = _fake_hgb
+    dd._kev_cache = None
+    _kev = await dd._fetch_cisa_kev(20)
+    assert [it["title"].split("：")[0] for it in _kev] == ["CVE-2099-0001", "CVE-2099-0002"], _kev
+    assert _kev[0]["title"] == "CVE-2099-0001：Acme Router —— 命令注入", _kev[0]["title"]
+    assert "⚠️ 已用于勒索软件" in _kev[0]["summary"], _kev[0]["summary"]
+    assert "⚠️" not in _kev[1]["summary"], _kev[1]["summary"]
+    assert _kev[0]["url"] == "https://nvd.nist.gov/vuln/detail/CVE-2099-0001"
+    assert _kev[0]["link"] == _kev[0]["url"]
+    _kev2 = await dd._fetch_cisa_kev(20)
+    assert len(_kev2) == 2 and _calls["n"] == 1, (_calls, len(_kev2))
+    pl.config["security_kev_days"] = 2
+    _kev3 = await dd._fetch_cisa_kev(20)
+    assert len(_kev3) == 1 and _kev3[0]["title"].startswith("CVE-2099-0001"), _kev3
+    assert _calls["n"] == 1, "窗口收窄不应重新下载"
+
+    def _boom_hgb(url, *a, **k):
+        raise RuntimeError("mock 网络挂了")
+
+    dd._http_get_bytes = _boom_hgb
+    dd._kev_cache = None
+    assert await dd._fetch_cisa_kev(20) == [], "抓取失败必须返回空列表"
+    dd._http_get_bytes = _orig_hgb
+    pl.config["security_kev_days"] = 7
+    print("[24a] cisa:kev 解析（7 天窗口/勒索标记/nvd/缓存/失败隔离）OK")
+
+    # 24b) feeds_ai 走 ai_recent_days 窗口（默认 2 天，硬卡昨日条目太少）
+    import urllib.request as _ureq2
+    from email.utils import format_datetime as _fmt_dt
+
+    def _rss(pairs):
+        body = "".join(
+            "<item><title>%s</title><link>https://qbitai.example/%s</link>"
+            "<pubDate>%s</pubDate><description>d</description></item>"
+            % (t, t, _fmt_dt(_when))
+            for t, _when in pairs
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
+            "<title>qbitai</title>%s</channel></rss>" % body
+        ).encode("utf-8")
+
+    _orig_hgb2 = dd._http_get_bytes
+
+    class _FakeResp2:
+        def __init__(self, data):
+            self._d = data
+
+        def read(self):
+            return self._d
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    _body = _rss([
+        ("AI 新模型发布，推理成本再降", _now - datetime.timedelta(hours=6)),
+        ("十天后才该出现的旧闻", _now - datetime.timedelta(days=10)),
+    ])
+    dd._http_get_bytes = lambda url, *a, **k: _body
+    try:
+        pl.config["ai_recent_days"] = 2
+        _ai_items = await dd._fetch_category("feeds_ai", 5)
+        _titles = [it["title"] for it in _ai_items]
+        assert "AI 新模型发布，推理成本再降" in _titles, _titles
+        assert "十天后才该出现的旧闻" not in _titles, _titles
+        pl.config["ai_recent_days"] = 1
+        _ai_items2 = await dd._fetch_category("feeds_ai", 5)
+        # 两个默认源都会喂同一段 RSS，去重后应只剩「当天那条」
+        assert {it["title"] for it in _ai_items2} == {"AI 新模型发布，推理成本再降"}, _ai_items2
+    finally:
+        dd._http_get_bytes = _orig_hgb2
+    print("[24b] feeds_ai 时效窗口（ai_recent_days）OK")
+
+    # 24c) 模板渲染出新板块标题
+    _sec_items = [{"title": "示例条目", "link": "https://e.x/1", "url": "https://e.x/1",
+                   "pub_date": _now, "summary": "摘要"}]
+    _md2 = dd._template_digest(None, {"feeds_ai": _sec_items, "feeds_security": _sec_items})
+    assert "🤖 AI 界的新变化" in _md2, _md2[:400]
+    assert "🛡️ 网安漏洞与情报" in _md2, _md2[:400]
+    print("[24c] 模板渲染新板块标题 OK")
+
+    # 24d) 配置 schema 新键
+    _schema_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"
+    )
+    _schema = json.load(open(_schema_path, encoding="utf-8"))
+    for _k, _t, _dv in (
+        ("ai_enabled", "bool", True),
+        ("security_enabled", "bool", True),
+        ("ai_recent_days", "int", 2),
+        ("security_recent_days", "int", 2),
+        ("security_kev_days", "int", 7),
+    ):
+        assert _k in _schema, "schema 缺少 " + _k
+        assert _schema[_k]["type"] == _t, (_k, _schema[_k]["type"])
+        assert _schema[_k]["default"] == _dv, (_k, _schema[_k]["default"])
+    assert "cisa:kev" in str(_schema["feeds_security"]["default"])
+    assert "qbitai" in str(_schema["feeds_ai"]["default"])
+    assert "AI 界的新变化" in _schema["llm_prompt"]["default"]
+    assert "网安漏洞与情报" in _schema["llm_prompt"]["default"]
+    assert "AI 界的新变化" in mod.DIGEST_DEFAULT_PROMPT
+    assert "网安漏洞与情报" in dd._normalize_prompt("旧的提示词")
+    print("[24d] schema 7 个新键 + 提示词默认值 OK")
+
+    # 24e) 中文字体自愈（图片乱码根因：官方镜像无 CJK 字体）
+    assert mod.CJK_FONT_ASSET == os.path.join("assets", "fonts", "digest_cjk.ttf"), mod.CJK_FONT_ASSET
+    _repo_font = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "assets", "fonts", "digest_cjk.ttf",
+    )
+    assert os.path.getsize(_repo_font) > 500_000, "自带中文字体缺失或过小"
+    from PIL import ImageFont as _IF
+
+    _rf = _IF.truetype(_repo_font, 24)
+    assert bytes(_rf.getmask("中")) != bytes(_rf.getmask("国")), "自带字体把中文画成方框"
+    assert _rf.getbbox("每日简报")[2] > 50, "自带字体量不到中文宽度"
+
+    _tmp_data = tempfile.mkdtemp()
+    _tmp_plug = os.path.join(_tmp_data, "plugins", "astrbot_plugin_elaina_suite")
+    _tmp_asset_dir = os.path.join(_tmp_plug, "assets", "fonts")
+    os.makedirs(_tmp_asset_dir, exist_ok=True)
+    open(os.path.join(_tmp_plug, "main.py"), "w").close()
+    with open(_repo_font, "rb") as _fs:
+        _fb = _fs.read()
+    _tmp_asset = os.path.join(_tmp_asset_dir, "digest_cjk.ttf")
+    with open(_tmp_asset, "wb") as _fd:
+        _fd.write(_fb)
+    _orig_mod_file = mod.__file__
+    mod.__file__ = os.path.join(_tmp_plug, "main.py")
+    try:
+        assert mod._plugin_data_dir() == _tmp_data, mod._plugin_data_dir()
+        _p1 = mod._ensure_cjk_font()
+        assert _p1 == os.path.join(_tmp_data, "font.ttf"), _p1
+        assert os.path.getsize(_p1) == len(_fb), "字体未完整写入"
+        with open(_p1, "wb") as _fu:
+            _fu.write(b"USERFONT")
+        assert mod._ensure_cjk_font() == _p1
+        with open(_p1, "rb") as _fr:
+            assert _fr.read() == b"USERFONT", "不应覆盖用户已有 font.ttf"
+        os.remove(_tmp_asset)
+        os.remove(_p1)
+        assert mod._ensure_cjk_font() is None, "资源缺失应静默返回 None"
+    finally:
+        mod.__file__ = _orig_mod_file
+    assert "_ensure_cjk_font()" in inspect.getsource(mod.DailyDigestCore._send_image), \
+        "_send_image 未调用字体自愈"
+    assert "_ensure_cjk_font()" in inspect.getsource(mod.ElainaSuitePlugin.__init__), \
+        "__init__ 未调用字体自愈"
+    print("[24e] 中文字体自愈 OK")
+    print("[24] AI 界的新变化 + 网安漏洞与情报板块 OK")
+
     await pl.terminate()
     assert ctx.send_message is orig, "门禁未卸载"
     print("[16] terminate() 完成，门禁已卸载")
