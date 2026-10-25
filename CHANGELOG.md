@@ -449,3 +449,16 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
   窗口收窄重算 / 失败隔离）、`feeds_ai` 时效窗口、模板渲染新标题、schema 新键、
   字体自愈（缺失补 / 不覆盖 / 资源缺失静默）。`tests/test_merged.py` 24 组全过。
 - `metadata.yaml` 版本 → 1.1.7。
+
+## v1.1.8（2026-10-25）
+
+### 问题
+- 图片兜底渲染（网络 t2i 失败时走本地 PIL）中文已修复，但 emoji 仍显示为方框 □：自带的中文字体是 GB2312 子集，不含任何 emoji 字形。
+
+### 改动
+- `_sanitize_for_image` 增加 emoji 剔除：`_IMAGE_EMOJI_RE` 覆盖 `U+1F000–U+1FAFF`（🚀🤖💻💊🌤）、区域旗帜、ZWJ/变体选择符、`U+2600–U+27BF`（☀✅❌）、`U+2B00–U+2BFF`（⭐）、`U+2300–U+23FF`（⏳⏱）；同时收敛剔除后产生的连续空格。
+- 网络渲染与本地兜底两条路径都会去掉 emoji，观感一致；**`.md` 文件不受影响，emoji 完整保留**。简报里的 emoji 只是板块装饰，标题文字本身还在。
+
+### 其它
+- tests 新增 `[24f]`（astral 字符 / 变体选择符 / ZWJ 全部剔除，正文文字保留）。
+- `metadata.yaml` 1.1.7 → 1.1.8。

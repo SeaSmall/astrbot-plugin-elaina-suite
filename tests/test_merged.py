@@ -1337,6 +1337,15 @@ async def main():
     assert "_ensure_cjk_font()" in inspect.getsource(mod.ElainaSuitePlugin.__init__), \
         "__init__ 未调用字体自愈"
     print("[24e] 中文字体自愈 OK")
+
+    # 24f) 图片文本去掉 emoji（本地字体无 emoji 字形会画方框）
+    clean = mod._sanitize_for_image("## 🤖 AI 界的新变化 ✅ 抓取成功 🛡️ 网安 ⏳ 等待 ⭐ 精选")
+    assert not any(ord(c) >= 0x1F000 for c in clean), clean
+    assert "️" not in clean and "‍" not in clean, clean
+    assert "✅" not in clean and "⏳" not in clean and "⭐" not in clean, clean
+    for keep in ("AI 界的新变化", "抓取成功", "网安", "精选"):
+        assert keep in clean, (keep, clean)
+    print("[24f] 图片文本剔除 emoji（保留正文）OK")
     print("[24] AI 界的新变化 + 网安漏洞与情报板块 OK")
 
     await pl.terminate()
