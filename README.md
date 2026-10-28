@@ -33,6 +33,8 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 > 旧版行为（每日预生成 5-10 条）：`living_enabled=false` 时保持原样，可随时回滚对照。
 消息内容由**人格 + 世界观**驱动：在 `world_setting` 里写好角色所处的世界与处境（例如「旅行中的魔女，正坐火车去下一个国家」），AI 会以第一人称分享她这一刻的经历与见闻，而不是天天问你吃饭睡觉；按 `self_share_ratio`（默认 70%）分配「分享自己」与「关心你」的比例，关心类至少保留 1 条——两者都要，不是把关心删掉。
 生成时会**先读记忆库**：每天 03:00 让 AI 把近期真实对话总结成一份「关于你这个人」的档案（发生过的事、爱好与偏好、正在做的事与进度、人际关系、情绪状态、明确约定）存进记忆库，写消息时注入提示词，AI 因此记得你是谁、在忙什么、聊过什么，而不是每天凭空寒暄；发出的消息再写回会话历史，形成闭环，避免今天重复昨天的话。记忆**只记用户**、不记 AI 自己（语气、称呼、性格、做过什么由人格设定负责）；多个会话的摘要会再合并成一份去重档案，注入前还会兜底剃掉「助手自称…」这类行并按正文去重——`/记忆` 里看到的第一段就是真正注入给 AI 的内容。成文由「规划 → 并行写手 → 审校」三个子代理协作完成（每个时间点一个独立写手，上下文更小、不易串味），规划或子代理失败时自动回退单次调用。
+> 🆕 **情感状态 v2（阶段三 · Sentipolis PAD，`affect_enabled`，默认关闭）**：角色有一套**连续的三维情感状态**（愉悦 P / 唤醒 A / 掌控 D，各 [-1,1]），按论文的双速动力学演化——每轮对话走一次**快通道**即时更新，重要感（poignancy）累计超过 150 时走**慢通道**做一次反思归纳；衰减按真实时间折算（半衰期 120 分钟）。另加一个**沉默评估**模块：距上次交互远超该角色平常节奏时，注入一条「对方很久没回应」的负面评估事件（走正常更新通道，不直接改数值），并把衰减目标点拉向低落的基线。生成主动消息时读当前情感，转成简短的「此刻心情」注入提示词——低愉悦低掌控时会提示「试探、留退路、别把话说满」。用 `/情感状态` 查看。详见 [`docs/PHASE3_REPORT.md`](docs/PHASE3_REPORT.md)。
+
 > 🆕 **长期记忆（阶段二 · mem0，`mem0_enabled`，默认关闭）**：接入 mem0（嵌入式 qdrant + fastembed 中文向量，全部落 `<data>/` 持久卷）。三件事：**写入**（用户+助手配成一轮，攒够 `mem0_flush_turns` 轮后后台写入新记忆）、**召回**（主动消息生成前用最近几条发言做查询，命中结果作为【你记得的事】注入提示词）、**种子**（`worldview.json` 的 34 条世界观事实在首次启动时写入记忆）。实现上全程懒加载单例 + `asyncio.to_thread`（`import mem0` 冷启 13.7s、建实例 1.6~10.4s、qdrant 目录独占锁），任何失败只降级不打断聊天；默认 `infer=False` 直接存原文（开启 LLM 抽取会有 13 秒级延迟）。详见 [`docs/PHASE2_REPORT.md`](docs/PHASE2_REPORT.md)。
 
 **4. Elaina 表情包**：完全对齐原版 `astrbot_plugin_Elaina_meme_Bridge` —— AI 每次回复后按
@@ -74,20 +76,21 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
   `_bypass_cnt` 加一，门禁直接放行；其它插件 / AstrBot 内置主动 Agent 仍被拦截。
   （单插件版曾出现的「日报被门禁拦掉」问题，在合并版里从结构上不存在。）
 - **钩子清单**：`event_message_type(ALL)` × 2（图片桥接 / 门禁活跃记录）、
-  `on_llm_request` × 2（图片注入 / 拦截兜底快照）、`on_llm_response` × 2（长期记忆写入 `priority=99998` / 表情包 `priority=99999`）、
+  `on_llm_request` × 2（图片注入 / 拦截兜底快照）、`on_llm_response` × 3（长期记忆写入 `priority=99998` / 情感快通道 `priority=99997` / 表情包 `priority=99999`）、
   `on_decorating_result` × 1（拦截兜底）——互不抢占，全部生效。
 - **指令清单**：`/digest`(`/日报`)、`/订阅日报`、`/退订日报`、`/今日计划`、`/重建今日计划`、
-  `/记忆`、`/刷新记忆`、`/主动状态`(`/主动消息状态`)、`/记忆状态`(`/长期记忆状态`)、`/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
+  `/记忆`、`/刷新记忆`、`/主动状态`(`/主动消息状态`)、`/记忆状态`(`/长期记忆状态`)、`/情感状态`(`/心情状态`)、`/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 132 项，按前缀分组：
+配置面板里共 143 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `ai_enabled` / `security_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `ai_recent_days` / `security_recent_days` / `security_kev_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_ai` / `feeds_security` / `feeds_medical` / `feeds_policy` / `llm_prompt`
 - **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `world_setting` / `self_share_ratio` / `message_prompt` / `subagent_enabled` / `subagent_parallel` / `subagent_concurrency` / `subagent_review` / `memory_enabled` / `memory_cron` / `memory_turns` / `memory_window_hours` / `memory_refresh_cooldown` / `memory_rewrite_stale` / `memory_notes_enabled` / `memory_notes_chars` / `memory_refresh_before_gen` / `dispatch_fact_check` / `dispatch_regenerate_on_memory_change` / `memory_max_chars` / `memory_raw_fallback` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
 - **主动消息 v2（阶段一）**：`living_enabled` / `living_min_silence_minutes` / `living_cooldown_minutes` / `living_daily_max` / `living_quiet_hours` / `living_offset_min` / `living_offset_max` / `living_ramp_minutes` / `living_decision_check_minutes` / `living_persona_chars` / `living_worldview_chars`
 - **长期记忆（阶段二 · mem0）**：`mem0_enabled` / `mem0_llm_model` / `mem0_llm_base_url` / `mem0_llm_api_key` / `mem0_embed_model` / `mem0_top_k` / `mem0_threshold_pct` / `mem0_seed_facts` / `mem0_flush_turns` / `mem0_recall_chars` / `mem0_infer`
+- **情感状态（阶段三 · Sentipolis PAD）**：`affect_enabled` / `affect_fast_mode` / `affect_decay_half_life_minutes` / `affect_silence_threshold_minutes` / `affect_silence_check_minutes` / `affect_silence_cooldown_minutes` / `affect_silence_target` / `affect_reflect_poignancy` / `affect_slow_delta_cap` / `affect_inject_chars` / `affect_baseline`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
@@ -99,6 +102,15 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - 一个都不发：确认 `meme_enabled` 打开、`meme_probability` > 0（默认 0.5）；
 - 发的是「随机一张」而不是 AI 选的那张：说明 AI 回的文件名没对上（日志里会有 `AI 选择 \`xxx\` 不在库中，改用随机一张`），换个更强的对话模型通常就好；
 - QQ 官方平台媒体上传偶发失败时，插件会校验图片魔数/大小并带 `send_timeout` 超时，不会卡死（详见更新日志）。
+**Q：情感状态（`affect_enabled`）会不会让角色情绪乱跳？**
+
+不会。快通道默认是规则式评估（夸赞/冷淡/冲突/极短回复四类，零 LLM 调用、零延迟），
+每个维度单次增量有上限（`affect_slow_delta_cap`），并带 120 分钟半衰期的持续回落；
+慢通道要等重要度累计超过 `affect_reflect_poignancy`（默认 150）才触发一次，且必须 LLM 可用。
+开 `affect_fast_mode=llm` 可以换成更细的 LLM 评估，但每轮会多一次极短调用。
+状态落在 `<data>/affect_state.json`，`/情感状态` 可随时查看当前 PAD、重要度与沉默严重度；
+把开关关掉即完全回到旧行为（不读不写不注入）。
+
 **Q：长期记忆（`mem0_enabled`）值得开吗？会不会拖慢回复？**
 - 第一次开启或重启后首次触发生成时会有 10~20 秒的模型加载（日志 `[memory] mem0 就绪（Xs）`），这段时间聊天不受影响（后台线程）；
 - 召回本身约 200ms（缓存命中更快）；写入是攒够轮数后后台批量跑，不阻塞对话；

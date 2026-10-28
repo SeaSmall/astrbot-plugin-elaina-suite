@@ -608,6 +608,7 @@ def load_worldview_asset() -> dict:
 LIVING_PROMPT_TEMPLATE = """{persona_block}
 {world_block}
 {memory_block}
+{affect_block}
 【此刻】
 现在：{now}（{period}）
 距离上次互动：{silence}
@@ -689,35 +690,70 @@ def _loose_llm_text(text, for_json: bool = False) -> str:
 
 
 def _json_objects(text: str) -> list[dict]:
-    """从文本里尽力捞出 JSON 对象：先整数组，再逐个 {...} 兜底。"""
+    """从文本里尽力捞出 JSON 对象：先整体（对象或数组），再按括号配对逐个兜底。"""
     out: list[dict] = []
-    m = re.search(r"\[.*\]", text, re.S)
-    if m:
-        try:
-            arr = json.loads(m.group(0))
-        except Exception:
-            arr = None
-        if isinstance(arr, list):
-            out.extend(o for o in arr if isinstance(o, dict))
-            return out
-        for chunk in re.findall(r"\{[^{}]*\}", m.group(0), re.S):
-            try:
-                obj = json.loads(chunk)
-            except Exception:
-                continue
-            if isinstance(obj, dict):
-                out.append(obj)
-        if out:
-            return out
-    for chunk in re.findall(r"\{[^{}]*\}", text, re.S):
+    raw = str(text or "").strip()
+    raw = re.sub(r"^```[a-zA-Z]*", "", raw).strip()
+    raw = re.sub(r"```$", "", raw).strip()
+    try:
+        whole = json.loads(raw)
+    except Exception:
+        whole = None
+    if isinstance(whole, dict):
+        return [whole]
+    if isinstance(whole, list):
+        got = [o for o in whole if isinstance(o, dict)]
+        if got:
+            return got
+    for chunk in _balanced_json_objects(raw):
         try:
             obj = json.loads(chunk)
         except Exception:
             continue
         if isinstance(obj, dict):
             out.append(obj)
+    if not out:
+        for chunk in re.findall(r"\{[^{}]*\}", raw, re.S):
+            try:
+                obj = json.loads(chunk)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
     return out
 
+
+def _balanced_json_objects(text: str) -> list[str]:
+    """扫描文本，按花括号配对切出可能嵌套的 JSON 对象（跳过字符串内的括号）。"""
+    chunks: list[str] = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+            continue
+        if ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    chunks.append(text[start:i + 1])
+                    start = -1
+    return chunks
 
 def _parse_date(text: str) -> datetime | None:
     """解析 RSS(RFC822)/Atom(ISO8601) 日期。"""
@@ -5136,6 +5172,8 @@ class ProactiveGuardCore(_PluginCoreBase):
         persona_block = await self._living_persona_block()
         world_block = await self._living_world_block()
         memory_block = await self._living_memory_block(umo)
+        affect_core = getattr(self.owner, "affect", None)
+        affect_block = affect_core.describe(umo) if affect_core is not None else ""
         last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
         gap_min = max(1.0, (now_dt.timestamp() - last) / 60.0)
         label = {
@@ -5149,6 +5187,7 @@ class ProactiveGuardCore(_PluginCoreBase):
         prompt = prompt.replace("{persona_block}", persona_block)
         prompt = prompt.replace("{world_block}", world_block)
         prompt = prompt.replace("{memory_block}", memory_block)
+        prompt = prompt.replace("{affect_block}", affect_block)
         prompt = prompt.replace("{now}", now_dt.strftime("%H:%M"))
         prompt = prompt.replace("{period}", self._living_period(now_dt))
         prompt = prompt.replace("{silence}", self._living_human_gap(gap_min))
@@ -5738,6 +5777,618 @@ class LivingMemoryCore(_PluginCoreBase):
             pass
         logger.info("[memory] 长期记忆已关闭")
 
+
+# ===========================================================================
+# 核心八：情感状态（阶段三 · Sentipolis 连续 PAD + 双速动力学 + 沉默评估）
+#
+# 论文对照：Fu, Chen, Xiao, Xuan, Busso, Diab. Sentipolis（arXiv:2601.18027,
+#           Findings of ACL 2026, pp.7465-7494）。本类严格按原文实现三件事：
+#   §1.2 PAD 三维连续状态，每维 [-1, 1]（Mehrabian 1996）。
+#   §1.3 快通道 = 每轮对话结束后做一次即时情感更新；
+#        慢通道 = 近期事件 poignancy 累计 > 150 触发 reflection，reflection 内
+#        结合人格画像输出各维 delta（不是「每 N 轮」）。
+#   §1.4 衰减 s(t+dt) = s(t) * 2 ** (-dt / T_half)，T_half = 120 分钟，
+#        每个 time step 无条件施加（无「有没有交互」的分支），按真实 dt 折算。
+#
+# 三处明确超出原文的新增（用户规格要求，均可在配置里关掉）：
+#   1) 「沉默评估」：论文没有 idle 机制（§1.5），这里新增周期性偏离度检查，
+#      超过阈值时向情感系统注入**显式负面评估事件**，走正常更新通道，
+#      不直接改写 PAD 值。
+#   2) 衰减「目标点」可偏移：原文衰减目标是中性点 [0,0,0]；沉默严重时把目标点
+#      换到负面基线（只换目标点，动力学形式完全不变）。
+#   3) PAD -> 文字：原文用 KNN(k=3) 在 MSP-Podcast 上反查 Plutchik 标签；本项目
+#      没有该语料，改用分档词表（更粗，但可复现、无外部依赖）。
+# ===========================================================================
+
+AFFECT_PAD_KEYS = ("p", "a", "d")
+
+AFFECT_APPRAISE_PROMPT = """你在为角色「伊蕾娜」做一次即时情感评估。
+
+【人格与说话方式】（只用于判断她的敏感点，不要模仿其文风）：
+{persona}
+
+【角色当前情感状态】愉悦 {p:+.2f} / 唤醒 {a:+.2f} / 掌控 {d:+.2f}
+
+【用户这一轮说的话】
+{user}
+
+【角色刚才的回复】
+{reply}
+
+请判断这一轮交互对角色情感的影响，只输出一个 JSON 对象，不要解释：
+{{"delta": {{"p": -0.3~0.3, "a": -0.2~0.2, "d": -0.3~0.3}}, "poignancy": 1~10, "appraisal": "不超过 20 字的判断"}}
+要求：
+- 被夸、被在意、聊得投机 → p 上升；被冷落、被敷衍、被否定 → p 下降。
+- 被冒犯或有冲突 → a 上升、d 下降；被认真倾听 → a 平稳、d 略升。
+- poignancy 是这件事对她的重要程度（1 = 无关紧要，10 = 会记很久）。"""
+
+AFFECT_REFLECT_PROMPT = """你在为角色「伊蕾娜」做一次情感回望（reflection）。
+
+【人格与情感倾向】：
+{persona}
+
+【最近发生的事】：
+{events}
+
+【当前情感状态】愉悦 {p:+.2f} / 唤醒 {a:+.2f} / 掌控 {d:+.2f}
+
+请把这些事放在一起看，判断它们累积在她心里留下了什么偏移，只输出一个 JSON：
+{{"delta": {{"p": -0.5~0.5, "a": -0.4~0.4, "d": -0.5~0.5}}, "insight": "不超过 30 字的一句话"}}
+要求：看的是累积影响，不是单件事的重复计算。"""
+
+AFFECT_SILENCE_APPRAISAL = (
+    "对方已经很久没有回话了。在她看来，这更像是疏离或被忽视，"
+    "而不是对方在忙——她不会直接说出来，但心里会往下沉。"
+)
+
+AFFECT_BLOCK_HEADER = "【此刻的心情】（不要向用户宣布这些内容，它只影响语气、分寸和要不要把话说满）"
+
+class AffectCore(_PluginCoreBase):
+    """Sentipolis 连续 PAD 情感核心：快/慢双速动力学 + 沉默评估 + 生成时注入。"""
+
+    def __init__(self, owner: "ElainaSuitePlugin") -> None:
+        super().__init__(owner)
+        self._sched = None
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._tasks: set = set()
+        self._cache: dict | None = None
+        self._last_silence_at: dict[str, float] = {}
+
+    # ------------------------------------------------------------- 配置读取
+    def _cfg(self, key: str, default):
+        try:
+            return self.config.get(key, default)
+        except Exception:
+            return default
+
+    def _on(self) -> bool:
+        return bool(self._cfg("affect_enabled", False))
+
+    def _cfloat(self, key: str, default: float) -> float:
+        try:
+            v = self._cfg(key, default)
+            if v is None or v == "":
+                return float(default)
+            return float(v)
+        except Exception:
+            return float(default)
+
+    def _cint(self, key: str, default: int) -> int:
+        try:
+            v = self._cfg(key, default)
+            if v is None or v == "":
+                return int(default)
+            return int(float(v))
+        except Exception:
+            return int(default)
+
+    def _cstr(self, key: str, default: str = "") -> str:
+        v = self._cfg(key, default)
+        return str(v if v is not None else default)
+
+    # ------------------------------------------------------------- 状态存储
+    def _state_file(self) -> str:
+        data = _plugin_data_dir()
+        return os.path.join(data, "affect_state.json") if data else ""
+
+    @staticmethod
+    def _sid(umo: str) -> str:
+        return re.sub(r"[^0-9A-Za-z_]+", "_", str(umo or ""))[:80] or "default"
+
+    def _lock(self, umo: str) -> asyncio.Lock:
+        sid = self._sid(umo)
+        lk = self._locks.get(sid)
+        if lk is None:
+            lk = asyncio.Lock()
+            self._locks[sid] = lk
+        return lk
+
+    def _load(self) -> dict:
+        if self._cache is not None:
+            return self._cache
+        path = self._state_file()
+        data = {}
+        if path:
+            try:
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        raw = json.load(f)
+                    if isinstance(raw, dict):
+                        data = raw
+            except Exception as e:
+                logger.warning(f"[affect] 读取情感状态失败（按空处理）: {e}")
+        data.setdefault("sessions", {})
+        data.setdefault("version", 1)
+        self._cache = data
+        return data
+
+    async def _save(self) -> None:
+        path = self._state_file()
+        if not path:
+            return
+        data = self._load()
+        payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        tmp = path + ".part"
+
+        def _write() -> None:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp, path)
+
+        try:
+            await asyncio.to_thread(_write)
+        except Exception as e:
+            logger.warning(f"[affect] 情感状态落盘失败: {e}")
+
+    # ------------------------------------------------------------- 基线与衰减
+    def _persona_baseline(self) -> dict:
+        """从 persona.json 的 emotional_tendencies.baseline_pad 取角色基线 PAD。"""
+        override = self._cstr("affect_baseline", "").strip()
+        raw = None
+        if override:
+            raw = override
+        else:
+            try:
+                p = load_persona_asset() or {}
+                tend = p.get("emotional_tendencies") or {}
+                raw = tend.get("baseline_pad")
+            except Exception:
+                raw = None
+        pad = {"p": 0.0, "a": 0.0, "d": 0.0}
+        if isinstance(raw, dict):
+            for dim in AFFECT_PAD_KEYS:
+                for k in (dim, dim + "leasure", "pleasure"):
+                    if k and k in raw:
+                        try:
+                            pad[dim] = float(raw[k])
+                            break
+                        except Exception:
+                            continue
+        elif isinstance(raw, (list, tuple)) and len(raw) >= 3:
+            for i, dim in enumerate(AFFECT_PAD_KEYS):
+                try:
+                    pad[dim] = float(raw[i])
+                except Exception:
+                    pass
+        elif isinstance(raw, str) and raw:
+            parts = [x.strip() for x in raw.replace("，", ",").split(",")]
+            for i, dim in enumerate(AFFECT_PAD_KEYS):
+                if i < len(parts):
+                    try:
+                        pad[dim] = float(parts[i])
+                    except Exception:
+                        pass
+        for dim in AFFECT_PAD_KEYS:
+            pad[dim] = max(-1.0, min(1.0, pad[dim]))
+        return pad
+
+    def _half_life(self) -> float:
+        return max(1.0, self._cfloat("affect_decay_half_life_minutes", 120.0))
+
+    def _silence_target(self, severity: float) -> dict:
+        """衰减目标点：默认中性 [0,0,0]；沉默严重时偏移到负面基线（新增，可关）。"""
+        base = {"p": 0.0, "a": 0.0, "d": 0.0}
+        if severity <= 0:
+            return base
+        raw = self._cstr("affect_silence_target", "-0.45,-0.10,-0.20")
+        parts = [x.strip() for x in raw.replace("，", ",").split(",")]
+        scale = min(1.0, max(0.0, severity))
+        for i, dim in enumerate(AFFECT_PAD_KEYS):
+            try:
+                base[dim] = float(parts[i]) * scale
+            except Exception:
+                pass
+        return base
+
+    @staticmethod
+    def _decay_to(pad: dict, dt_min: float, target: dict, half_life: float) -> dict:
+        if dt_min <= 0:
+            return {dim: float(pad.get(dim) or 0.0) for dim in AFFECT_PAD_KEYS}
+        k = 2.0 ** (-float(dt_min) / max(1.0, half_life))
+        out = {}
+        for dim in AFFECT_PAD_KEYS:
+            cur = float(pad.get(dim) or 0.0)
+            tgt = float(target.get(dim) or 0.0)
+            out[dim] = tgt + (cur - tgt) * k
+        return out
+
+    # ------------------------------------------------------------- 状态读写
+    def _entry(self, umo: str, now: float | None = None) -> dict:
+        data = self._load()
+        sid = self._sid(umo)
+        st = data["sessions"].get(sid)
+        if not isinstance(st, dict):
+            st = {}
+            data["sessions"][sid] = st
+        st.setdefault("umo", umo)
+        st.setdefault("pad", self._persona_baseline())
+        st.setdefault("baseline", self._persona_baseline())
+        st.setdefault("updated", now or time.time())
+        st.setdefault("poignancy", 0.0)
+        st.setdefault("events", [])
+        st.setdefault("silence_sev", 0.0)
+        st.setdefault("last_user_at", now or time.time())
+        return st
+
+    def get_state(self, umo: str, now: float | None = None) -> dict:
+        """取（并施加衰减后的）当前 PAD。衰减按真实 dt 折算，每次读都补算。"""
+        now = float(now if now is not None else time.time())
+        st = self._entry(umo, now)
+        sev = float(st.get("silence_sev") or 0.0)
+        dt_min = (now - float(st.get("updated") or now)) / 60.0
+        st["pad"] = self._decay_to(st.get("pad") or {}, dt_min, self._silence_target(sev), self._half_life())
+        st["updated"] = now
+        return st
+
+    def note_user(self, umo: str, now: float | None = None) -> None:
+        """记录用户互动：重置沉默严重度（沉默评估的偏离度归零）。"""
+        if not self._on() or not umo:
+            return
+        try:
+            now = float(now if now is not None else time.time())
+            st = self.get_state(umo, now)
+            st["last_user_at"] = now
+            st["silence_sev"] = 0.0
+        except Exception as e:
+            logger.debug(f"[affect] note_user 失败: {e}")
+
+    # ------------------------------------------------------------- 快通道
+    @staticmethod
+    def _clamp(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
+        return max(lo, min(hi, float(v)))
+
+    def _heuristic_delta(self, user_text: str, reply_text: str) -> dict:
+        """规则式 appraisal（LLM 不可用时的兜底；不加载模型、零延迟）。"""
+        t = str(user_text or "")
+        d = {"p": 0.02, "a": 0.03, "d": 0.01}
+        praise = ("喜欢你", "可爱", "厉害", "谢谢", "想你", "好听", "真好", "辛苦", "抱抱", "夸")
+        cold = ("随便", "无所谓", "烦", "闭嘴", "滚", "别烦", "没空", "不想聊", "算了", "呵呵")
+        conflict = ("你错了", "骗人", "假的", "蠢", "笨", "难看", "不喜欢你")
+        if any(k in t for k in praise):
+            d = {"p": 0.24, "a": 0.12, "d": 0.10}
+        if any(k in t for k in cold):
+            d = {"p": -0.26, "a": 0.06, "d": -0.12}
+        if any(k in t for k in conflict):
+            d = {"p": -0.30, "a": 0.20, "d": -0.16}
+        if len(t) <= 3:
+            d = {"p": -0.06, "a": -0.04, "d": 0.0}
+        return d
+
+    async def _llm_appraise(self, umo: str, user_text: str, reply_text: str) -> dict | None:
+        guard = getattr(self.owner, "proactive_guard", None)
+        if guard is None or not hasattr(guard, "_llm_chat"):
+            return None
+        st = self.get_state(umo)
+        pad = st.get("pad") or {}
+        persona = ""
+        try:
+            p = load_persona_asset() or {}
+            traits = [str(x.get("label") or x.get("summary") or "") for x in (p.get("traits") or [])[:4]]
+            persona = "；".join([x for x in traits if x])[:300]
+        except Exception:
+            persona = ""
+        prompt = AFFECT_APPRAISE_PROMPT.format(
+            persona=persona or "傲娇、毒舌、自尊心强、嘴硬心软",
+            p=float(pad.get("p") or 0.0),
+            a=float(pad.get("a") or 0.0),
+            d=float(pad.get("d") or 0.0),
+            user=str(user_text or "")[:400],
+            reply=str(reply_text or "")[:400],
+        )
+        try:
+            text = await guard._llm_chat(prompt)
+        except Exception as e:
+            logger.debug(f"[affect] 情感评估 LLM 失败（回退规则式）: {e}")
+            return None
+        objs = _json_objects(text or "")
+        for obj in objs:
+            if isinstance(obj, dict) and isinstance(obj.get("delta"), dict):
+                return {"delta": obj.get("delta") or {}, "poignancy": obj.get("poignancy"),
+                        "appraisal": obj.get("appraisal")}
+        return None
+
+    async def fast_update(self, umo: str, user_text: str, reply_text: str) -> None:
+        """快通道：每轮对话结束一次即时更新（原文 §1.3）。"""
+        if not self._on() or not umo:
+            return
+        mode = self._cstr("affect_fast_mode", "heuristic").strip().lower()
+        result = None
+        if mode == "llm":
+            result = await self._llm_appraise(umo, user_text, reply_text)
+        if result is None:
+            result = {"delta": self._heuristic_delta(user_text, reply_text),
+                      "poignancy": 3, "appraisal": "规则式评估"}
+        delta = result.get("delta") or {}
+        try:
+            poignancy = float(result.get("poignancy") or 3)
+        except Exception:
+            poignancy = 3.0
+        async with self._lock(umo):
+            await self._apply(umo, delta, kind="turn",
+                              note=str(result.get("appraisal") or "")[:60], poignancy=poignancy)
+        await self._maybe_reflect(umo)
+
+    async def _apply(self, umo: str, delta: dict, kind: str, note: str = "", poignancy: float = 0.0) -> dict:
+        """正常更新通道：评估事件 -> PAD 增量 + 累加 poignancy（唯一改 PAD 的入口）。"""
+        st = self.get_state(umo)
+        pad = st.get("pad") or {}
+        cap = max(0.05, self._cfloat("affect_slow_delta_cap", 0.6))
+        for dim in AFFECT_PAD_KEYS:
+            try:
+                step = float(delta.get(dim) or 0.0)
+            except Exception:
+                step = 0.0
+            step = max(-cap, min(cap, step))
+            pad[dim] = self._clamp(float(pad.get(dim) or 0.0) + step)
+        st["pad"] = pad
+        st["poignancy"] = float(st.get("poignancy") or 0.0) + max(0.0, float(poignancy or 0.0))
+        ev = st.get("events") or []
+        ev.append({"t": int(time.time() * 1000), "kind": kind, "note": note,
+                   "delta": {k: round(float(delta.get(k) or 0.0), 3) for k in AFFECT_PAD_KEYS}})
+        st["events"] = ev[-40:]
+        await self._save()
+        return st
+
+    # ------------------------------------------------------------- 慢通道
+    async def _maybe_reflect(self, umo: str) -> None:
+        if not self._on():
+            return
+        thr = max(10.0, self._cfloat("affect_reflect_poignancy", 150.0))
+        st = self.get_state(umo)
+        if float(st.get("poignancy") or 0.0) < thr:
+            return
+        await self._reflect(umo)
+
+    async def _reflect(self, umo: str) -> dict:
+        """慢通道：poignancy 累计过阈值后的一次 reflection（原文 §1.3，走 LLM）。"""
+        guard = getattr(self.owner, "proactive_guard", None)
+        st = self.get_state(umo)
+        events = st.get("events") or []
+        lines = []
+        for ev in events[-12:]:
+            note = str(ev.get("note") or "").strip()
+            if note:
+                lines.append("- " + note)
+        persona = ""
+        try:
+            p = load_persona_asset() or {}
+            traits = [str(x.get("label") or "") for x in (p.get("traits") or [])[:6]]
+            persona = "；".join([x for x in traits if x])[:400]
+        except Exception:
+            persona = ""
+        pad = st.get("pad") or {}
+        deltas = None
+        if guard is not None and hasattr(guard, "_llm_chat") and lines:
+            prompt = AFFECT_REFLECT_PROMPT.format(
+                persona=persona or "傲娇、毒舌、自尊心强、嘴硬心软",
+                events=chr(10).join(lines)[:1200],
+                p=float(pad.get("p") or 0.0),
+                a=float(pad.get("a") or 0.0),
+                d=float(pad.get("d") or 0.0),
+            )
+            try:
+                text = await guard._llm_chat(prompt)
+                for obj in _json_objects(text or ""):
+                    if isinstance(obj, dict) and isinstance(obj.get("delta"), dict):
+                        deltas = obj.get("delta")
+                        break
+            except Exception as e:
+                logger.debug(f"[affect] reflection LLM 失败（跳过本轮）: {e}")
+        if deltas is None:
+            # LLM 不可用：把累积的重要度折成一次温和回落，避免 poignancy 无限累积
+            deltas = {"p": -0.05, "a": -0.05, "d": 0.0}
+        async with self._lock(umo):
+            await self._apply(umo, deltas, kind="reflection", note="一次情感回望", poignancy=0.0)
+            st2 = self.get_state(umo)
+            st2["poignancy"] = 0.0
+            await self._save()
+        st["poignancy"] = 0.0
+        logger.info("[affect] 慢通道 reflection 已执行（poignancy 归零）")
+        return deltas
+
+    # ------------------------------------------------------------- 沉默评估（新增）
+    def _expected_gap_minutes(self) -> float:
+        """角色节奏基线：低于这个沉默时长不算反常（可配置，默认 12 小时）。"""
+        return max(30.0, self._cfloat("affect_silence_threshold_minutes", 720.0))
+
+    def silence_severity(self, umo: str, now: float | None = None) -> float:
+        now = float(now if now is not None else time.time())
+        st = self.get_state(umo, now)
+        last = float(st.get("last_user_at") or now)
+        silence = max(0.0, (now - last) / 60.0)
+        exp = self._expected_gap_minutes()
+        dev = silence / exp
+        # 偏离度 -> 严重度：等于基线为 0，2 倍基线为 1，做线性压缩后上限 1.5
+        sev = max(0.0, min(1.5, dev - 1.0))
+        return sev
+
+    async def silence_check(self, now: float | None = None) -> dict:
+        """周期性检查「离上次互动多久 vs 角色节奏」，超阈值时注入负面评估事件。"""
+        if not self._on():
+            return {"checked": 0, "injected": 0}
+        now = float(now if now is not None else time.time())
+        data = self._load()
+        checked = 0
+        injected = 0
+        cooldown = max(5.0, self._cfloat("affect_silence_cooldown_minutes", 120.0)) * 60.0
+        for sid, st in list((data.get("sessions") or {}).items()):
+            if not isinstance(st, dict):
+                continue
+            umo = st.get("umo") or sid
+            checked += 1
+            sev = self.silence_severity(umo, now)
+            if sev <= 0.05:
+                st["silence_sev"] = 0.0
+                continue
+            ended = self._last_silence_at.get(sid)
+            if ended and now - ended < cooldown:
+                st["silence_sev"] = min(1.0, sev)
+                continue
+            delta = {"p": -0.18 * sev, "a": 0.05 * sev, "d": -0.12 * sev}
+            async with self._lock(umo):
+                await self._apply(umo, delta, kind="silence", note=AFFECT_SILENCE_APPRAISAL, poignancy=8.0)
+                cur = self.get_state(umo, now)
+                cur["silence_sev"] = min(1.0, sev)
+                await self._save()
+            self._last_silence_at[sid] = now
+            injected += 1
+            logger.info(f"[affect] 沉默评估注入负面事件：{sid} 偏离度={sev:.2f}")
+        return {"checked": checked, "injected": injected}
+
+    # ------------------------------------------------------------- 生成时注入
+    @staticmethod
+    def _level(v: float, bands) -> str:
+        for limit, label in bands:
+            if v <= limit:
+                return label
+        return bands[-1][1]
+
+    def describe(self, umo: str, chars: int = 0) -> str:
+        """把当前 PAD 翻成给生成用的「此刻心情」块（分档词表，非 KNN）。"""
+        if not self._on() or not umo:
+            return ""
+        try:
+            st = self.get_state(umo)
+        except Exception:
+            return ""
+        pad = st.get("pad") or {}
+        p = float(pad.get("p") or 0.0)
+        a = float(pad.get("a") or 0.0)
+        d = float(pad.get("d") or 0.0)
+        p_txt = self._level(p, [(-0.45, "很低落、心里发闷"), (-0.15, "有点低落"), (0.15, "还算平静"),
+                                (0.45, "心情不错"), (2.0, "心情很好")])
+        a_txt = self._level(a, [(-0.35, "提不起劲"), (-0.1, "很安静"), (0.2, "有点起伏"),
+                                (0.5, "精神很足"), (2.0, "情绪很冲")])
+        d_txt = self._level(d, [(-0.4, "没把握、有点怯"), (-0.1, "不太有底气"), (0.25, "一般"),
+                                (0.55, "有底气"), (2.0, "很有掌控感")])
+        hints = []
+        if p < -0.1 and d < 0.0:
+            hints.append("话别说满：可以用试探、留退路的说法，先看对方反应再往下接")
+        if p < -0.2:
+            hints.append("不要主动起热闹的话题；被问起时也别急着把情绪摊开，只会漏一点")
+        if p > 0.25 and a > 0.1:
+            hints.append("可以轻快一点，语气更活，允许主动分享自己刚遇到的小事")
+        if p > 0.2 and d > 0.3:
+            hints.append("可以稍微自恋一点、把功劳往自己身上揽，这是她的常态而不是情绪失控")
+        if a > 0.45:
+            hints.append("别让情绪一次冲出去：句子更短、停顿更多")
+        sev = float(st.get("silence_sev") or 0.0)
+        if sev > 0.2:
+            hints.append("对方很久没理你：想确认又不想显得在意，只会用抱怨或别的话题带一下")
+        lines = [
+            AFFECT_BLOCK_HEADER,
+            "愉悦 {0:+.2f}（{1}）／唤醒 {2:+.2f}（{3}）／掌控 {4:+.2f}（{5}）".format(p, p_txt, a, a_txt, d, d_txt),
+        ]
+        if hints:
+            lines.append("表达方式：" + "；".join(hints))
+        events = st.get("events") or []
+        notes = [str(e.get("note") or "").strip() for e in events[-2:]]
+        notes = [n for n in notes if n]
+        if notes:
+            lines.append("刚刚发生：" + "；".join(notes))
+        text = chr(10).join(lines)
+        limit = int(chars or self._cint("affect_inject_chars", 600))
+        return text[:limit] if limit > 0 else text
+
+    def status(self) -> dict:
+        data = self._load()
+        sessions = {}
+        for sid, st in (data.get("sessions") or {}).items():
+            if not isinstance(st, dict):
+                continue
+            pad = st.get("pad") or {}
+            sessions[sid] = {
+                "umo": st.get("umo"),
+                "pad": {k: round(float(pad.get(k) or 0.0), 3) for k in AFFECT_PAD_KEYS},
+                "poignancy": round(float(st.get("poignancy") or 0.0), 1),
+                "silence_sev": round(float(st.get("silence_sev") or 0.0), 2),
+                "events": len(st.get("events") or []),
+            }
+        return {"enabled": self._on(), "running": bool(self._sched and getattr(self._sched, "running", False)),
+                "half_life": self._half_life(), "sessions": sessions}
+
+    # ------------------------------------------------------------- 生命周期
+    async def _silence_tick(self) -> None:
+        try:
+            await self.silence_check()
+        except Exception as e:
+            logger.warning(f"[affect] 沉默评估任务失败: {e}")
+
+    async def initialize(self) -> None:
+        if not self._on():
+            logger.info("[affect] 情感状态未启用（affect_enabled=false）")
+            return
+        data = self._load()
+        guard = getattr(self.owner, "proactive_guard", None)
+        # 首次启动时把已知会话补进来（否则沉默评估没有对象）
+        try:
+            if guard is not None and hasattr(guard, "_collect_target_sessions"):
+                for umo in await guard._collect_target_sessions():
+                    self._entry(umo)
+            await self._save()
+        except Exception as e:
+            logger.debug(f"[affect] 初始化会话列表失败: {e}")
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+            tz = "Asia/Shanghai"
+            mins = max(1, self._cint("affect_silence_check_minutes", 15))
+            self._sched = AsyncIOScheduler(timezone=tz)
+            self._sched.add_job(
+                self._silence_tick, "interval", minutes=mins,
+                id="affect_silence", replace_existing=True,
+                coalesce=True, max_instances=1, misfire_grace_time=300,
+            )
+            self._sched.start()
+            logger.info(f"[affect] 情感状态已启动（PAD 衰减 T½={self._half_life():.0f} 分钟，"
+                        f"沉默评估每 {mins} 分钟，{len(data.get('sessions') or {})} 个会话）")
+        except Exception as e:
+            self._sched = None
+            logger.warning(f"[affect] 沉默评估调度启动失败（情感状态其余功能仍可用）: {e}")
+
+    async def close(self) -> None:
+        for t in list(self._tasks):
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        self._tasks.clear()
+        if self._sched is not None:
+            try:
+                self._sched.remove_all_jobs()
+            except Exception:
+                pass
+            try:
+                self._sched.shutdown(wait=False)
+            except Exception:
+                pass
+            self._sched = None
+        try:
+            await self._save()
+        except Exception:
+            pass
+        self._cache = None
+        logger.info("[affect] 情感状态已停止")
 
 # ===========================================================================
 # 核心四：Elaina 表情包（本地表情库 + AI 选图，对齐原版 astrbot_plugin_Elaina_meme_Bridge）
@@ -6854,6 +7505,7 @@ class ElainaSuitePlugin(Star):
         self.daily_digest = DailyDigestCore(self)
         self.living_memory = LivingMemoryCore(self)
         self.proactive_guard = ProactiveGuardCore(self)
+        self.affect = AffectCore(self)
         self.meme = ElainaMemeCore(self)
         self.llm_guard = LlmGuardCore(self)
         self.system_health = SystemHealthCore(self)
@@ -6883,6 +7535,7 @@ class ElainaSuitePlugin(Star):
         await self.daily_digest.initialize()
         await self.proactive_guard.initialize()
         await self.living_memory.initialize()
+        await self.affect.initialize()
         await self.system_health.initialize()
         await self.meme.initialize()
 
@@ -6893,6 +7546,7 @@ class ElainaSuitePlugin(Star):
         await self.daily_digest.terminate()
         await self.proactive_guard.terminate()
         await self.living_memory.close()
+        await self.affect.close()
         await self.system_health.terminate()
 
     # ------------------------------------------------------------------ #
@@ -6908,6 +7562,7 @@ class ElainaSuitePlugin(Star):
         """门禁：记录会话最近活跃时间（不产生任何回复）。"""
         await self.proactive_guard._on_user_message(event)
         await self.living_memory.on_user_message(event)
+        self.affect.note_user(event.unified_msg_origin)
 
     # ------------------------------------------------------------------ #
     # LLM 钩子路由
@@ -6922,6 +7577,14 @@ class ElainaSuitePlugin(Star):
         """LLM 拦截兜底：挂兜底错误文案 + 记录请求快照。"""
         await self.llm_guard.on_llm_request(event, req)
 
+    @filter.on_llm_response(priority=99997)
+    async def affect_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """情感状态：每轮对话结束后做一次即时情感更新（快通道）。"""
+        try:
+            reply = str(getattr(resp, "completion_text", "") or "")
+            await self.affect.fast_update(event.unified_msg_origin, event.message_str, reply)
+        except Exception as e:
+            logger.debug(f"[affect] 快通道更新失败: {e}")
     @filter.on_llm_response(priority=99998)
     async def memory_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """长期记忆：把「用户 + 助手」配成一轮，够数后后台写入 mem0。"""
@@ -6982,6 +7645,29 @@ class ElainaSuitePlugin(Star):
         async for result in self.proactive_guard.living_status_command(event):
             yield result
 
+    @filter.command("情感状态", alias={"心情状态"})
+    async def affect_status_cmd(self, event: AstrMessageEvent):
+        """查看情感状态：PAD 三维、poignancy 累计、沉默严重度、最近情感事件。"""
+        st = self.affect.status()
+        lines = [
+            "情感状态（阶段三 · Sentipolis PAD）：",
+            "  启用：{}".format("是" if st.get("enabled") else "否"),
+            "  沉默评估：{}".format("运行中" if st.get("running") else "未运行"),
+            "  衰减半衰期：{:.0f} 分钟".format(float(st.get("half_life") or 0)),
+        ]
+        sessions = st.get("sessions") or {}
+        if not sessions:
+            lines.append("  会话：无（还没开始记录）")
+        for sid, info in sessions.items():
+            pad = info.get("pad") or {}
+            lines.append(
+                "  [{}] 愉悦{:+.2f} / 唤醒{:+.2f} / 掌控{:+.2f}；poignancy {:.1f}；沉默严重度 {:.2f}；事件 {} 条".format(
+                    str(sid)[:24], float(pad.get("p") or 0), float(pad.get("a") or 0),
+                    float(pad.get("d") or 0), float(info.get("poignancy") or 0),
+                    float(info.get("silence_sev") or 0), int(info.get("events") or 0),
+                )
+            )
+        yield event.plain_result(chr(10).join(lines))
     @filter.command("记忆状态", alias={"长期记忆状态"})
     async def memory_status_cmd(self, event: AstrMessageEvent):
         """查看长期记忆（mem0）状态：是否启用、是否就绪、缓冲与种子情况。"""

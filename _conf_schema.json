@@ -561,6 +561,61 @@
     "default": false,
     "description": "写入时是否让 LLM 抽取事实。开启会有 13 秒级延迟、抽取质量取决于模型，默认关闭（直接存原文）。"
   },
+  "affect_enabled": {
+    "type": "bool",
+    "description": "启用情感状态（阶段三 · Sentipolis PAD 连续情感 + 双速动力学 + 沉默评估）",
+    "default": false
+  },
+  "affect_fast_mode": {
+    "type": "string",
+    "description": "快通道评估方式：heuristic（规则式，零延迟）/ llm（每轮多一次极短 LLM 调用，更准）",
+    "default": "heuristic"
+  },
+  "affect_decay_half_life_minutes": {
+    "type": "int",
+    "description": "PAD 衰减半衰期（分钟，论文默认 120）",
+    "default": 120
+  },
+  "affect_silence_threshold_minutes": {
+    "type": "int",
+    "description": "沉默评估基线：多久不回话才算反常（分钟，默认 720 = 12 小时）",
+    "default": 720
+  },
+  "affect_silence_check_minutes": {
+    "type": "int",
+    "description": "沉默评估检查间隔（分钟）",
+    "default": 15
+  },
+  "affect_silence_cooldown_minutes": {
+    "type": "int",
+    "description": "两次沉默负面评估事件之间的最小间隔（分钟）",
+    "default": 120
+  },
+  "affect_silence_target": {
+    "type": "string",
+    "description": "沉默严重时衰减的目标点 p,a,d（默认朝低落/无把握偏移；留空恢复中性）",
+    "default": "-0.45,-0.10,-0.20"
+  },
+  "affect_reflect_poignancy": {
+    "type": "int",
+    "description": "慢通道触发阈值：近期事件 poignancy 累计超过它才做一次 reflection（论文默认 150）",
+    "default": 150
+  },
+  "affect_slow_delta_cap": {
+    "type": "float",
+    "description": "单次更新允许的最大 PAD 增量（防抖）",
+    "default": 0.6
+  },
+  "affect_inject_chars": {
+    "type": "int",
+    "description": "注入生成提示词的「此刻心情」块最大字数",
+    "default": 600
+  },
+  "affect_baseline": {
+    "type": "string",
+    "description": "PAD 基线覆盖（p,a,d）；留空则用 persona.json 里的 emotional_tendencies.baseline_pad",
+    "default": ""
+  },
   "meme_enabled": {
     "type": "bool",
     "default": true,
