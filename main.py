@@ -5956,9 +5956,16 @@ class AffectCore(_PluginCoreBase):
                 raw = None
         pad = {"p": 0.0, "a": 0.0, "d": 0.0}
         if isinstance(raw, dict):
+            # 显式别名表（persona.json 用 pleasure/arousal/dominance，
+            # 不能靠 "pleasure" 兜底否则三个维度都会被填成 pleasure 的值）
+            aliases = {
+                "p": ("p", "pleasure", "P", "Pleasure"),
+                "a": ("a", "arousal", "A", "Arousal"),
+                "d": ("d", "dominance", "D", "Dominance"),
+            }
             for dim in AFFECT_PAD_KEYS:
-                for k in (dim, dim + "leasure", "pleasure"):
-                    if k and k in raw:
+                for k in aliases.get(dim, (dim,)):
+                    if k in raw:
                         try:
                             pad[dim] = float(raw[k])
                             break

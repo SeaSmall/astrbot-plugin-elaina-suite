@@ -569,9 +569,11 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - `_json_objects()` 原先只认「整段是数组」或平铺 `{...}`，**单个顶层对象且内含嵌套对象时会把内层对象当成结果**，
   慢通道的 appraisal / reflection 输出正好是这种形状 → 静默失效。改为先整体 `json.loads`（对象或数组），
   再按括号配对扫描（跳过字符串内括号、支持嵌套）兜底。
+- `_persona_baseline()` 的字典别名回退写成 `(dim, dim+'leasure', 'pleasure')`，arousal / dominance 都会落到
+  `pleasure` 上（真机基线 `0.15/0.15/0.15`，应为 `0.15/0.25/0.70`）→ 改为显式别名表。
 
 ### 其它
-- 新增 `tests/test_affect.py`（11 组：衰减/快通道/慢通道/沉默评估/目标点偏移/分档描述/持久化/接线/配置/解析器）；
+- 新增 `tests/test_affect.py`（12 组：衰减/快通道/慢通道/沉默评估/目标点偏移/分档描述/持久化/接线/配置/解析器/基线映射）；
   `test_merged.py` 24 组、`test_living.py` 12 组、`test_memory.py` 10 组回归全过。
 - 新增 `docs/PHASE3_REPORT.md`：逐条对照规格、三处对论文的显式偏离及理由（沉默评估为新增、衰减目标点可偏移、
   PAD→文字用分档词表代替 KNN）、配置项表、测试证据、遗留项。

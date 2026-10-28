@@ -241,10 +241,22 @@ async def a11_json_objects():
     print("[A11] _json_objects 支持单个顶层对象/代码围栏/嵌套对象 OK")
 
 
+async def a12_baseline():
+    core = make_core(affect_baseline="")
+    pad = core._persona_baseline()
+    assert (abs(pad["p"] - 0.15) < 1e-9 and abs(pad["a"] - 0.25) < 1e-9
+            and abs(pad["d"] - 0.70) < 1e-9), pad
+    assert len({pad["p"], pad["a"], pad["d"]}) == 3, "三维不能都被 pleasure 兜底"
+    core2 = make_core(affect_baseline="-0.2, 0.1, 0.3")
+    pad2 = core2._persona_baseline()
+    assert (abs(pad2["p"] + 0.2) < 1e-9 and abs(pad2["a"] - 0.1) < 1e-9
+            and abs(pad2["d"] - 0.3) < 1e-9), pad2
+    print("[A12] 基线取 persona.json 的 pleasure/arousal/dominance（不被 pleasure 兜底）+ 覆盖生效 OK")
+
 async def main():
     for fn in [a1_decay_half_life, a2_disabled, a3_fast_channel, a4_slow_reflect,
                a5_silence_channel, a6_silence_decay_target, a7_describe, a8_persist,
-               a9_wiring, a10_schema, a11_json_objects]:
+               a9_wiring, a10_schema, a11_json_objects, a12_baseline]:
         await fn()
     print("阶段三（情感状态）测试全部通过")
 

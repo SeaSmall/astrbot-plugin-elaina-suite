@@ -61,12 +61,15 @@
 - A9 接线完整：构造/初始化/收尾/回复钩子/注入位/状态命令
 - A10 11 个 `affect_*` 配置键齐全且默认关闭
 - A11 `_json_objects` 支持单个顶层对象/代码围栏/嵌套对象
+- A12 基线取 persona.json 的 pleasure/arousal/dominance 三键（不被 pleasure 兜底），覆盖字符串生效
 
 回归：`test_merged.py` 24 组、`test_living.py` 12 组、`test_memory.py` 10 组全过。
 
 ## 6. 顺带修掉的真 bug
 
 `_json_objects()` 原实现只尝试「整段是数组」与 `\{[^{}]*\}` 平铺匹配，**单个顶层对象且内含嵌套对象时会把内层对象当成结果返回**（如 `{"delta":{"p":-0.3},"poignancy":12}` 只捞出 `{"p":-0.3}`）。慢通道 appraise/reflection 的输出正是这种形状，会静默失效。现改为：先整体 `json.loads`（对象或数组），再按**括号配对扫描**（跳过字符串内的括号，支持嵌套）逐个兜底。A11 覆盖。
+
+`_persona_baseline()` 也有一个同类 bug：字典分支的别名回退写成 `(dim, dim+'leasure', 'pleasure')`，导致 arousal / dominance 都落到 `pleasure` 上，真机基线变成 `0.15/0.15/0.15`（应为 `0.15/0.25/0.70`）。现改为显式别名表 `{p: (p, pleasure), a: (a, arousal), d: (d, dominance)}`，A12 覆盖。
 
 ## 7. 明确未做 / 遗留
 
