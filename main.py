@@ -622,6 +622,45 @@ LIVING_PROMPT_TEMPLATE = """{persona_block}
 """
 
 
+# 阶段五：傲娇的三条替代路径——把「傲娇」从可以直接说出口的标签还原成行为。
+TSUNDERE_PATHS = (
+    "① 行动先行 + 借口收尾：先做具体的事或给出具体信息，再用不暴露柔软的借口解释动机",
+    "② 毒舌包裹真实信息：用吐槽或嫌弃的语气说出真实内容，信息是真的，态度是刺的",
+    "③ 关心以「泄露」出现：让对方看见你在意，但立刻收回或把话题带走",
+)
+# 元话语式否定：直接否认自己动机、替对方解读自己的句子，出现即判定失败。
+TSUNDERE_FORBIDDEN = (
+    "才不是特意", "才不是为了", "才不是关心", "才没有想", "我才没有", "我才不关心",
+    "我才不在乎", "我才不是", "又不是为了你", "并不是为了", "别误会",
+)
+TSUNDERE_META_RE = (
+    r"才不是.{0,8}(特意|故意|专门|为了|担心|在乎|关心|想)",
+    r"我才(没有|不是).{0,8}(特意|故意|为了|担心|在乎|关心|想|等)",
+    r"又不是为了你",
+    r"别误会",
+)
+# 负面情感越强，傲娇越「加密」：不直说难过，改用抱怨/挑刺/装作随口一问。
+TSUNDERE_ENCRYPT_HINTS = {
+    0: "心情还算平稳：嘴上嫌弃归嫌弃，该给的信息直接给，别为了傲娇而傲娇。",
+    1: "情绪有点往下走：嘴再硬一点，关心更藏一点，用嫌弃或别的话题把它带过去。",
+    2: "情绪明显低落：不许直说难过、不许问「你是不是不想理我」；用抱怨、挑刺或装作随口一问来确认对方还在，被戳穿也不承认。",
+}
+TSUNDERE_REVIEW_PROMPT = """你是严格的中文写作审校，只判断一条消息是否符合「傲娇」的写法要求，并给出可用的改写。
+
+【消息】
+{text}
+
+【当前情感】{affect}
+
+【判定标准（三条全过才算 PASS）】
+1. 零元话语：不得出现「才不是特意…」「我才没有…」「又不是为了你…」「别误会…」这类直接否认自己动机、替对方解读自己的句子。出现即 FAIL。
+2. 可追溯的关心：若这条消息包含关心或在意，必须能指认它承载在哪个具体行动、具体信息或具体事由上；只有空泛情绪或只有否认 → FAIL。
+3. 语气一致：毒舌/嫌弃是稳定底色，不是突然的应激防御；情绪越负面，越该用抱怨、挑刺、装作随口一问来「加密」，而不是直白告白或冷淡敷衍。
+
+只输出 JSON，不要任何额外文字：
+{"pass": true 或 false, "reason": "简短理由", "rewrite": "若 pass 为 false 且能改写，给出改写后的一条消息（同样长度与人格语气）；否则空字符串"}
+"""
+
 def _image_chain(render_result) -> MessageChain:
     """把 text_to_image(return_url=True) 的返回值转成可发送的图片消息链。
 
@@ -5038,7 +5077,7 @@ class ProactiveGuardCore(_PluginCoreBase):
                     pass
 
     # ---------------------------- 触发阶段 ---------------------------- #
-    async def _living_persona_block(self) -> str:
+    async def _living_persona_block(self, umo: str = "") -> str:
         p = load_persona_asset()
         if not p:
             return ""
@@ -5083,29 +5122,20 @@ class ProactiveGuardCore(_PluginCoreBase):
         if habits:
             lines.append("表达习惯：" + "；".join(str(h.get("habit") or "") for h in habits[:6]) + "。")
         ts = p.get("tsundere")
-        if isinstance(ts, dict):
-            lines.append("【傲娇机制】（这是你表达的方式，不是要向对方解释的概念）")
-            negs = [
-                str(n.get("pattern"))
-                for n in (ts.get("negation_patterns") or [])
-                if isinstance(n, dict) and n.get("pattern")
-            ]
-            if negs:
-                lines.append("· 嘴硬时可以这样写：" + "；".join(negs[:3]))
-            leaks = [
-                str(l.get("mechanism"))
-                for l in (ts.get("care_leak_patterns") or [])
-                if isinstance(l, dict) and l.get("mechanism")
-            ]
-            if leaks:
-                lines.append("· 关心要以泄露的方式出现：" + "；".join(leaks[:3]))
+        if isinstance(ts, dict) and self._cfg_bool("tsundere_enabled", True):
+            lines.append("【傲娇怎么表达】（这是你的说话方式，不是要向对方解释的概念）")
+            lines.append("· 三条可用路径：" + "；".join(TSUNDERE_PATHS))
             forb = [
                 str(f.get("phrase") or f.get("id"))
                 for f in (ts.get("forbidden_meta_phrases") or [])
                 if isinstance(f, dict) and (f.get("phrase") or f.get("id"))
             ]
-            if forb:
-                lines.append("· 绝对禁止（出现即判定失败）：" + "；".join(forb))
+            if not forb:
+                forb = list(TSUNDERE_FORBIDDEN[:6])
+            lines.append(
+                "· 铁律：绝不直接否认自己的动机，也不许替对方解读你。禁止出现：" + "、".join(forb)
+            )
+            lines.append("· " + self._tsundere_encrypt_hint(umo))
         proh = [
             str(x.get("rule"))
             for x in (p.get("prohibitions") or [])
@@ -5187,10 +5217,81 @@ class ProactiveGuardCore(_PluginCoreBase):
                     )
         return (chr(10) + chr(10)).join(p for p in parts if p)
 
+    def _tsundere_encrypt_level(self, umo: str = "") -> int:
+        """按当前情感算傲娇「加密」档位：0 平稳 / 1 走低 / 2 明显低落（含沉默负面评估）。"""
+        if not self._cfg_bool("tsundere_encrypt_negative", True):
+            return 0
+        core = getattr(self.owner, "affect", None)
+        if core is None or not getattr(core, "enabled", lambda: False)():
+            return 0
+        try:
+            st = core.get_state(umo) or {}
+        except Exception:
+            return 0
+        pad = st.get("pad") or {}
+        try:
+            p = float(pad.get("p") or 0.0)
+        except Exception:
+            p = 0.0
+        try:
+            sev = float(st.get("silence_sev") or 0.0)
+        except Exception:
+            sev = 0.0
+        if p <= -0.25 or sev >= 0.5:
+            return 2
+        if p <= 0.1 or sev > 0.0:
+            return 1
+        return 0
+
+    def _tsundere_encrypt_hint(self, umo: str = "") -> str:
+        return TSUNDERE_ENCRYPT_HINTS.get(self._tsundere_encrypt_level(umo), TSUNDERE_ENCRYPT_HINTS[0])
+
+    def tsundere_chat_block(self, umo: str = "") -> str:
+        """给正常对话的 system prompt 用的紧凑傲娇约束（阶段五）。"""
+        if not self._cfg_bool("tsundere_enabled", True):
+            return ""
+        if not self._cfg_bool("tsundere_chat_inject", True):
+            return ""
+        lines = ["【傲娇怎么写（说话方式，不是要解释的概念）】"]
+        lines.extend("· " + p for p in TSUNDERE_PATHS)
+        lines.append(
+            "· 铁律：不直接否认自己的动机，不替对方解读你；"
+            "禁止「才不是特意…」「我才没有…」「又不是为了你…」「别误会…」这类句子。"
+        )
+        lines.append("· " + self._tsundere_encrypt_hint(umo))
+        return chr(10).join(lines)
+
+    async def _living_tsundere_review(self, text: str, umo: str = "", affect_text: str = "") -> str:
+        """阶段五审校：模型判定三条铁律，PASS 原样返回；FAIL 用改写（仍过静态检查）或空串。"""
+        if not self._cfg_bool("tsundere_review_enabled", True):
+            return text
+        prompt = TSUNDERE_REVIEW_PROMPT.replace("{text}", text)
+        prompt = prompt.replace("{affect}", affect_text or "（无）")
+        try:
+            raw = await self._llm_chat(prompt)
+        except Exception as e:
+            logger.warning(f"[tsundere] 审校调用失败，放行原文: {e}")
+            return text
+        objs = _json_objects(str(raw or ""))
+        verdict = next((o for o in objs if isinstance(o, dict) and "pass" in o), None)
+        if not isinstance(verdict, dict):
+            logger.info("[tsundere] 审校结果无法解析，放行原文")
+            return text
+        ok = verdict.get("pass")
+        if ok is True:
+            return text
+        rewrite = str(verdict.get("rewrite") or "").strip()
+        reason = str(verdict.get("reason") or "")[:60]
+        logger.info(f"[tsundere] 审校未通过（{reason}），改写={rewrite[:40]}")
+        if rewrite:
+            fixed = self._living_check_text(self._clean_message(rewrite))
+            if fixed:
+                return fixed
+        return ""
     async def _living_compose(
         self, umo: str, s: dict, intent: str, reason: str, now_dt: datetime, topic: str = ""
     ) -> str:
-        persona_block = await self._living_persona_block()
+        persona_block = await self._living_persona_block(umo)
         world_block = await self._living_world_block()
         memory_block = await self._living_memory_block(umo)
         affect_core = getattr(self.owner, "affect", None)
@@ -5217,29 +5318,46 @@ class ProactiveGuardCore(_PluginCoreBase):
         prompt = prompt.replace(
             "{reason_block}", f"（由头：{reason}{extra}）" if (reason or topic) else ""
         )
-        try:
-            raw = await self._llm_chat(prompt)
-        except Exception as e:
-            logger.warning(f"[living] 生成主动消息失败: {e}")
-            return ""
-        text = self._clean_message(raw)
+        retry = max(0, min(3, self._cfg_int("tsundere_max_retry", 1)))
+        text = ""
+        for attempt in range(1 + retry):
+            ask = prompt
+            if attempt:
+                ask = prompt + chr(10) + (
+                    "【重写】上一条被判定违反傲娇铁律（元话语式否定或关心不可追溯）。"
+                    "重写：不要直接否认自己的动机，把在意藏在具体行动、具体信息或吐槽里。"
+                )
+            try:
+                raw = await self._llm_chat(ask)
+            except Exception as e:
+                logger.warning(f"[living] 生成主动消息失败: {e}")
+                return ""
+            text = self._living_check_text(self._clean_message(raw))
+            if text:
+                break
+            logger.info(f"[living] 第 {attempt + 1} 次生成未过硬约束，重试")
         if not text:
-            logger.warning("[living] 生成结果为空，本次放弃")
+            logger.warning("[living] 生成结果为空或多次命中硬约束，本次放弃")
             return ""
-        return self._living_check_text(text)
+        return await self._living_tsundere_review(text, umo, affect_block)
 
     @staticmethod
     def _living_check_text(text: str) -> str:
-        """阶段一的最小硬约束：命中「元话语式否定」就丢弃这条（阶段五升级为大模型审校）。"""
-        forbidden = ("才不是特意", "我才没有", "又不是为了你", "别误会")
-        if any(f in text for f in forbidden):
-            logger.info(f"[living] 命中元话语式否定，丢弃: {text[:40]}")
+        """阶段五硬约束（零容忍）：元话语式否定、AI 自称一律丢弃。"""
+        if not text:
             return ""
+        for bad in TSUNDERE_FORBIDDEN:
+            if bad in text:
+                logger.info(f"[tsundere] 命中元话语式否定（{bad}），丢弃: {text[:40]}")
+                return ""
+        for pat in TSUNDERE_META_RE:
+            if re.search(pat, text):
+                logger.info(f"[tsundere] 命中元话语正则（{pat}），丢弃: {text[:40]}")
+                return ""
         if "作为AI" in text or "作为一个AI" in text or "语言模型" in text:
-            logger.info(f"[living] 命中 AI 自称，丢弃: {text[:40]}")
+            logger.info(f"[tsundere] 命中 AI 自称，丢弃: {text[:40]}")
             return ""
         return text
-
     async def _living_fire(self, umo: str, token: str) -> None:
         if not self._living_on():
             return
@@ -8095,6 +8213,23 @@ class ElainaSuitePlugin(Star):
     # ------------------------------------------------------------------ #
     # LLM 钩子路由
     # ------------------------------------------------------------------ #
+    @filter.on_llm_request(priority=99996)
+    async def tsundere_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """阶段五：把傲娇三路径 + 铁律注入正常对话的 system prompt（幂等，不重复注入）。"""
+        try:
+            guard = getattr(self, "proactive_guard", None)
+            if guard is None:
+                return
+            block = guard.tsundere_chat_block(str(getattr(event, "unified_msg_origin", "") or ""))
+            if not block:
+                return
+            cur = str(getattr(req, "system_prompt", "") or "")
+            if "【傲娇怎么写" in cur:
+                return
+            req.system_prompt = (cur + chr(10) + block) if cur else block
+            logger.info("[tsundere] 已向对话 system prompt 注入傲娇三路径")
+        except Exception as e:
+            logger.warning(f"[tsundere] 注入失败: {e}")
     @filter.on_llm_request()
     async def image_bridge_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """图片问答桥接：把挂起的图片识别内容注入本次 LLM 请求。"""

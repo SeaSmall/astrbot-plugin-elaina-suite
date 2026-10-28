@@ -656,6 +656,36 @@
     "description": "落选候选意图的降权系数（只降权不删除）",
     "default": 0.85
   },
+  "tsundere_enabled": {
+    "type": "bool",
+    "description": "启用傲娇三路径（阶段五 · 行动先行+借口收尾 / 毒舌包裹真实信息 / 关心以「泄露」出现）",
+    "default": true
+  },
+  "tsundere_review_enabled": {
+    "type": "bool",
+    "description": "启用傲娇审校代理（模型按三条铁律判定，未通过则改写或重生成；多一次 LLM 调用）",
+    "default": true
+  },
+  "tsundere_chat_inject": {
+    "type": "bool",
+    "description": "把傲娇三路径 + 铁律注入正常对话的 system prompt（不只主动消息）",
+    "default": true
+  },
+  "tsundere_encrypt_negative": {
+    "type": "bool",
+    "description": "负面情感越强傲娇越「加密」（不直说难过，改用抱怨/挑刺/装作随口一问）",
+    "default": true
+  },
+  "tsundere_max_retry": {
+    "type": "int",
+    "description": "命中元话语式否定时的最大重生成次数",
+    "default": 1,
+    "slider": {
+      "min": 0,
+      "max": 3,
+      "step": 1
+    }
+  },
   "meme_enabled": {
     "type": "bool",
     "default": true,

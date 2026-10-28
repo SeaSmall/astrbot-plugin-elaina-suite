@@ -167,6 +167,8 @@ def make_core(**overrides):
 
     async def _llm(prompt):
         core.prompts.append(prompt)
+        if "判定标准" in prompt:
+            return '{"pass": true, "reason": "ok", "rewrite": ""}'
         return "今天的风把帽子吹跑了，捡回来的时候上面沾了片叶子。"
 
     core._collect_target_sessions = _sessions
@@ -384,11 +386,13 @@ async def t11_prompt_blocks_and_hard_filters():
     s["last_user_at"] = time.time() - 5400
     text = await core._living_compose(UMO, s, "share", "测试由头", core._living_now())
     assert text, "compose 返回空"
-    prompt = core.prompts[-1]
+    gen_prompts = [p for p in core.prompts if "判定标准" not in p]
+    prompt = gen_prompts[0]
     assert "【人格】" in prompt and "伊蕾娜" in prompt
     assert "【世界观" in prompt
-    assert "【傲娇机制】" in prompt
+    assert "【傲娇怎么表达】" in prompt and "三条可用路径" in prompt
     assert "测试由头" in prompt
+    assert any("判定标准" in p for p in core.prompts), "阶段五审校应被调用"
     assert "【记忆】" not in prompt or "关于对方" in prompt
     for bad in ("才不是特意", "我才没有", "又不是为了你", "别误会"):
         assert core._living_check_text(f"{bad}关心你") == ""

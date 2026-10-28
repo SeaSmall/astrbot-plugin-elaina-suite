@@ -35,6 +35,12 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 生成时会**先读记忆库**：每天 03:00 让 AI 把近期真实对话总结成一份「关于你这个人」的档案（发生过的事、爱好与偏好、正在做的事与进度、人际关系、情绪状态、明确约定）存进记忆库，写消息时注入提示词，AI 因此记得你是谁、在忙什么、聊过什么，而不是每天凭空寒暄；发出的消息再写回会话历史，形成闭环，避免今天重复昨天的话。记忆**只记用户**、不记 AI 自己（语气、称呼、性格、做过什么由人格设定负责）；多个会话的摘要会再合并成一份去重档案，注入前还会兜底剃掉「助手自称…」这类行并按正文去重——`/记忆` 里看到的第一段就是真正注入给 AI 的内容。成文由「规划 → 并行写手 → 审校」三个子代理协作完成（每个时间点一个独立写手，上下文更小、不易串味），规划或子代理失败时自动回退单次调用。
 > 🆕 **动机与注意力（阶段四 · GWA 式候选竞争 + 内在动机，`motivation_enabled`，默认关闭）**：每次决定要不要主动说话时，先在内心列几个候选念头（分享自己的事 / 关心对方 / 追问没说完的话题 / 对对方提过的事产生好奇 / 试探对方还在不在），再按「情感状态 × 学习进度 × 有没有具体由头」打分，**只有一个念头赢得注意力**进入生成，其余降权留到下次。学习进度门控负责防「只追新不沉淀」：某话题反复发起却没回应，优先级下降；得到回应后回升。低落时「分享自己的事」降权、「试探性确认」升权。新增 `/动机状态`（别名 `/注意力状态`）可看上次竞争谁赢、落选者分数与每条话题的学习进度。详见 [`docs/PHASE4_REPORT.md`](docs/PHASE4_REPORT.md)。
 
+> 🆕 **傲娇表达（阶段五 · 三条行为路径 + 零容忍元话语，`tsundere_enabled`，默认开启）**：傲娇不再被写成可以直接说出口的标签
+> （「才不是特意…」「我才没有…」这种替对方解读你的句子，出现即丢弃并重生成），而只给三条**行为**路径：
+> 行动先行 + 借口收尾、毒舌包裹真实信息、关心以「泄露」出现。审校代理按「零元话语 / 可追溯的关心 / 语气一致」三条判定，
+> 未通过用它的改写或重生成。情绪越负面，傲娇越「加密」：不直说难过，改用抱怨、挑刺、装作随口一问。
+> 正常对话也生效（`on_llm_request` 注入 system prompt）。详见 [`docs/PHASE5_REPORT.md`](docs/PHASE5_REPORT.md)。
+
 > 🆕 **情感状态 v2（阶段三 · Sentipolis PAD，`affect_enabled`，默认关闭）**：角色有一套**连续的三维情感状态**（愉悦 P / 唤醒 A / 掌控 D，各 [-1,1]），按论文的双速动力学演化——每轮对话走一次**快通道**即时更新，重要感（poignancy）累计超过 150 时走**慢通道**做一次反思归纳；衰减按真实时间折算（半衰期 120 分钟）。另加一个**沉默评估**模块：距上次交互远超该角色平常节奏时，注入一条「对方很久没回应」的负面评估事件（走正常更新通道，不直接改数值），并把衰减目标点拉向低落的基线。生成主动消息时读当前情感，转成简短的「此刻心情」注入提示词——低愉悦低掌控时会提示「试探、留退路、别把话说满」。用 `/情感状态` 查看。详见 [`docs/PHASE3_REPORT.md`](docs/PHASE3_REPORT.md)。
 
 > 🆕 **长期记忆（阶段二 · mem0，`mem0_enabled`，默认关闭）**：接入 mem0（嵌入式 qdrant + fastembed 中文向量，全部落 `<data>/` 持久卷）。三件事：**写入**（用户+助手配成一轮，攒够 `mem0_flush_turns` 轮后后台写入新记忆）、**召回**（主动消息生成前用最近几条发言做查询，命中结果作为【你记得的事】注入提示词）、**种子**（`worldview.json` 的 34 条世界观事实在首次启动时写入记忆）。实现上全程懒加载单例 + `asyncio.to_thread`（`import mem0` 冷启 13.7s、建实例 1.6~10.4s、qdrant 目录独占锁），任何失败只降级不打断聊天；默认 `infer=False` 直接存原文（开启 LLM 抽取会有 13 秒级延迟）。详见 [`docs/PHASE2_REPORT.md`](docs/PHASE2_REPORT.md)。
@@ -85,7 +91,7 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 143 项，按前缀分组：
+配置面板里共 156 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `ai_enabled` / `security_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `ai_recent_days` / `security_recent_days` / `security_kev_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_ai` / `feeds_security` / `feeds_medical` / `feeds_policy` / `llm_prompt`
@@ -93,6 +99,7 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - **主动消息 v2（阶段一）**：`living_enabled` / `living_min_silence_minutes` / `living_cooldown_minutes` / `living_daily_max` / `living_quiet_hours` / `living_offset_min` / `living_offset_max` / `living_ramp_minutes` / `living_decision_check_minutes` / `living_persona_chars` / `living_worldview_chars`
 - **长期记忆（阶段二 · mem0）**：`mem0_enabled` / `mem0_llm_model` / `mem0_llm_base_url` / `mem0_llm_api_key` / `mem0_embed_model` / `mem0_top_k` / `mem0_threshold_pct` / `mem0_seed_facts` / `mem0_flush_turns` / `mem0_recall_chars` / `mem0_infer`
 - **动机与注意力（阶段四 · GWA 竞争 + 内在动机）**：`motivation_enabled` / `motivation_affect_gate` / `motivation_learning_gate` / `motivation_topic_max` / `motivation_topic_chars` / `motivation_engage_window_minutes` / `motivation_select_noise` / `motivation_loser_decay`
+- **傲娇表达（阶段五 · 三路径 + 审校）**：`tsundere_enabled` / `tsundere_review_enabled` / `tsundere_encrypt_negative` / `tsundere_max_retry` / `tsundere_chat_inject`
 - **情感状态（阶段三 · Sentipolis PAD）**：`affect_enabled` / `affect_fast_mode` / `affect_decay_half_life_minutes` / `affect_silence_threshold_minutes` / `affect_silence_check_minutes` / `affect_silence_cooldown_minutes` / `affect_silence_target` / `affect_reflect_poignancy` / `affect_slow_delta_cap` / `affect_inject_chars` / `affect_baseline`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`

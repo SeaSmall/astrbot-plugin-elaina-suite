@@ -601,3 +601,26 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - `_living_plan_intent` 改为 async 以承载竞争选择；`_living_on_user_message` 增加文本参数用于话题抽取。
 - 新增 `docs/PHASE4_REPORT.md`：候选池/评分公式/情感门控表/学习进度/配置/可观测性/测试证据/三处偏离/遗留。
 - 配置面板 143 → 151 项。
+
+## v1.6.0（2026-10-28）
+
+### 问题
+- 傲娇被写成了可以直接说出口的标签：人格块把 `negation_patterns` 里的句式原样塞给模型，
+  结果模型学会了「才不是特意…」「我才没有…」这种替观众解读自己的元话语——傲娇太假，不是太强。
+- 只在主动消息里做硬过滤，正常对话回复完全没有约束。
+
+### 改动
+- 人格块的傲娇段重写：不再给「嘴硬时可以这样写」的句式，只给三条**行为**路径
+  （行动先行+借口收尾 / 毒舌包裹真实信息 / 关心以「泄露」出现）+ 铁律（不直接否认动机、不替对方解读自己）。
+- 零容忍硬约束升级：`TSUNDERE_FORBIDDEN` 短语表 + `TSUNDERE_META_RE` 正则（覆盖「才不是…特意/为了/想」等变体），命中即丢弃并重生成。
+- 新增傲娇审校代理 `_living_tsundere_review`：模型按三条铁律（零元话语 / 可追溯的关心 / 语气一致）判定，
+  未通过用它的改写（改写仍要过静态检查），再不通过就丢弃这条。调用失败或结果解析失败时放行原文，不阻断发送。
+- 情感耦合：`_tsundere_encrypt_level` 按 PAD 与沉默严重度分三档，情绪越负面越「加密」——
+  不许直说难过、不许问「你是不是不想理我」，改用抱怨、挑刺、装作随口一问。
+- 正常对话也覆盖：`@filter.on_llm_request(priority=99996)` 把三路径 + 铁律注入 system prompt（幂等标记，不重复注入）。
+
+### 其它
+- 新增 `tests/test_tsundere.py`（10 组：静态硬约束/人格块路径/加密档位/审校 PASS/审校改写/解析降级/开关/生成重试/配置与接线/对话注入）；
+  `test_living.py` 11 组断言按新流程更新（生成提示词与审校提示词分开取样）；回归 merged 24 / living 12 / affect 12 / memory 10 / motivation 10 全过。
+- 新增 `docs/PHASE5_REPORT.md`：诊断、三路径、硬约束、加密分档、审校、对话注入、偏离、测试证据。
+- 配置面板 151 → 156 项（`tsundere_enabled` / `tsundere_review_enabled` / `tsundere_encrypt_negative` / `tsundere_max_retry` / `tsundere_chat_inject`）。
