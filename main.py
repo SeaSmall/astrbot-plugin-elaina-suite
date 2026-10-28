@@ -5617,7 +5617,11 @@ class LivingMemoryCore(_PluginCoreBase):
         uid = "elaina_world"
         have = set()
         try:
-            existing = await asyncio.to_thread(mem.get_all, filters={"user_id": uid})
+            # mem0 v2 的 get_all 默认 top_k=20，种子有 34 条 → 必须显式放大，
+            # 否则重启时只看见 20 条、把剩下 14 条当新事实重复写入。
+            existing = await asyncio.to_thread(
+                mem.get_all, filters={"user_id": uid}, top_k=1000
+            )
             items = existing.get("results") if isinstance(existing, dict) else existing
             for it in items or []:
                 if isinstance(it, dict):

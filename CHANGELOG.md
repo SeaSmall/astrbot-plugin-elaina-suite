@@ -530,3 +530,19 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 
 **其它**：新增 `tests/test_memory.py`（9 组，注入假 mem0 模块跑契约）；`tests/test_living.py` 12 组、
 `tests/test_merged.py` 24 组回归全过；文档新增 `docs/PHASE2_REPORT.md`。
+
+## v1.3.1（2026-10-28）
+
+### 问题
+- 真机重启后 34 条世界观点种子记忆会被重复写入：`mem0` v2 的 `get_all()` 默认 `top_k=20`，
+  而 `worldview.json` 有 34 条事实，判重集合只看到前 20 条 → 每次启动都补写剩下 14 条。
+
+### 改动
+- `LivingMemoryCore.seed_worldview()` 判重查询显式传 `top_k=1000`（不再依赖默认值）。
+- `tests/test_memory.py` 新增 `[M10]`：34 条事实 + 34 条已存在 → 写入 0 条，且断言 `top_k>=1000`。
+- `docs/PHASE2_REPORT.md` 补「真机召回验证」与 `get_all` 默认上限这条坑。
+
+### 其它
+- 真机验证：容器内复制 qdrant 目录后查询「魔法协会在哪里」top1 0.694（魔法统合协会）、
+  「这个世界有互联网吗」top1 0.5716（没有手机网络电脑）、「我是谁」0.4661（自称我 / 本魔女），
+  召回内容与世界观一致。

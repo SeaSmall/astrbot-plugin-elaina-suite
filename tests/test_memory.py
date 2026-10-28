@@ -179,8 +179,29 @@ async def m5_seed_idempotent():
         add_calls = [c for c in mem.calls if c[0] == "add"]
         assert add_calls and add_calls[0][2].get("user_id") == "elaina_world"
         assert add_calls[0][2].get("infer") is False
+        ga = [c for c in mem.calls if c[0] == "get_all"]
+        assert ga and int(ga[0][1].get("top_k") or 0) >= 1000, ga
         assert await e.seed_worldview() == 0, "第二次不应重复写"
         print("[M5] 世界观点种子幂等（已存在的跳过、infer=False） OK")
+    finally:
+        mod.load_worldview_asset = orig
+
+
+async def m10_seed_sees_all_beyond_default_limit():
+    """mem0 v2 get_all 默认 top_k=20；34 条种子必须一次看全，否则重复写。"""
+    e = make_engine()
+    orig = mod.load_worldview_asset
+    facts = [{"id": "f%d" % i, "fact": "事实%d" % i, "importance": 0.5} for i in range(34)]
+    mod.load_worldview_asset = lambda: {"facts": facts}
+    try:
+        mem = await e._ensure()
+        mem.all_items = [{"memory": "事实%d" % i} for i in range(34)]
+        added = await e.seed_worldview()
+        assert added == 0, added
+        ga = [c for c in mem.calls if c[0] == "get_all"]
+        assert int(ga[0][1].get("top_k") or 0) >= 1000, ga
+        assert not [c for c in mem.calls if c[0] == "add"], "全部已存在时不应再写"
+        print("[M10] get_all 显式 top_k=1000（34 条种子不被 20 条截断） OK")
     finally:
         mod.load_worldview_asset = orig
 
@@ -240,7 +261,8 @@ async def m9_wiring():
 
 async def main():
     for fn in [m1_disabled, m2_singleton, m3_search_contract, m4_recall_block,
-               m5_seed_idempotent, m6_buffered_write, m7_failure_degrade, m8_close, m9_wiring]:
+               m5_seed_idempotent, m6_buffered_write, m7_failure_degrade, m8_close, m9_wiring,
+               m10_seed_sees_all_beyond_default_limit]:
         await fn()
     print("阶段二（long-term memory）测试全部通过")
 
