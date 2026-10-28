@@ -4748,16 +4748,18 @@ class ProactiveGuardCore(_PluginCoreBase):
                 s["last_user_at"] = now
         await self._living_save(state)
         for umo in sessions:
-            s = state["sessions"].get(umo) or {}
+            s = self._living_sstate(state, umo)
             nxt = float(s.get("next_decision_at") or 0)
             if nxt <= now:
                 nxt = now + self._living_rng.randint(120, 600)
+            s["next_decision_at"] = nxt
             self._living_add_date_job(
                 self._living_decision_tick,
                 nxt,
                 [umo],
                 f"proactive_decision_{self._living_sid(umo)}",
             )
+        await self._living_save(state)
         if self._cfg_bool("memory_enabled", True):
             await self._living_schedule_memory()
         logger.info(
@@ -5248,6 +5250,66 @@ class ProactiveGuardCore(_PluginCoreBase):
             ),
             "sessions": state.get("sessions") or {},
         }
+
+    async def living_status_command(self, event: AstrMessageEvent):
+        """查看主动消息 v2 的调度状态（/主动状态）。"""
+        st = await self.living_status()
+        now = time.time()
+        lines: list[str] = []
+        if not st["enabled"]:
+            lines.append("主动消息 v2：未开启（living_enabled=false，走旧版每日计划发送）")
+        else:
+            run = "运行中" if st["scheduler_running"] else "未运行（异常！）"
+            lines.append(f"主动消息 v2：已开启，插件内部调度器{run}")
+
+        def _ago(ts) -> str:
+            try:
+                d = int(max(0, now - float(ts or 0)))
+            except Exception:
+                return "—"
+            if d < 60:
+                return "刚刚" if d >= 0 else "—"
+            if d < 3600:
+                return f"{d // 60} 分钟前"
+            if d < 86400:
+                return f"{d // 3600} 小时前"
+            return f"{d // 86400} 天前"
+
+        def _hm(ts) -> str:
+            try:
+                dt = self._living_dt(float(ts or 0))
+                return dt.strftime("%m-%d %H:%M") if dt else "—"
+            except Exception:
+                return "—"
+
+        sessions = st["sessions"] or {}
+        if not sessions:
+            lines.append("（暂无被追踪的会话：目标会话解析为空）")
+        for umo, s in sessions.items():
+            if not isinstance(s, dict):
+                continue
+            lines.append("")
+            lines.append(f"· {self._living_sid(umo)}")
+            lines.append(f"  最后互动：{_ago(s.get('last_user_at'))}")
+            pend = s.get("pending")
+            if isinstance(pend, dict) and pend.get("fire_at"):
+                lines.append(
+                    f"  待触发：{pend.get('label') or pend.get('intent')} @ {_hm(pend.get('fire_at'))}"
+                )
+            else:
+                lines.append("  待触发：无")
+            lines.append(f"  下次决策：{_hm(s.get('next_decision_at'))}")
+            lines.append(
+                f"  今日已发：{int(s.get('sent_today') or 0)} 条"
+                f"（上次主动：{_ago(s.get('last_proactive_at'))}）"
+            )
+            hist = [h for h in (s.get("history") or []) if isinstance(h, dict)][-5:]
+            if hist:
+                bits = []
+                for h in hist:
+                    bits.append(f"{h.get('time', '?')} {h.get('kind', '?')}: {str(h.get('detail') or '')[:28]}")
+                lines.append("  最近：" + " / ".join(bits))
+        yield event.plain_result(chr(10).join(lines))
 
 # ===========================================================================
 # 核心四：Elaina 表情包（本地表情库 + AI 选图，对齐原版 astrbot_plugin_Elaina_meme_Bridge）
@@ -6475,6 +6537,12 @@ class ElainaSuitePlugin(Star):
     async def rebuild_plan_command(self, event: AstrMessageEvent):
         """立即在后台重新生成明天的计划。"""
         async for result in self.proactive_guard.rebuild_plan_command(event):
+            yield result
+
+    @filter.command("主动状态", alias={"主动消息状态"})
+    async def living_status_cmd(self, event: AstrMessageEvent):
+        """查看主动消息 v2 的调度状态（会话、下次决策、待触发、今日已发）。"""
+        async for result in self.proactive_guard.living_status_command(event):
             yield result
 
     @filter.command("记忆")

@@ -486,3 +486,18 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - 一整天模拟（含两次用户回话）验证：安静时段 0 条、相邻间隔均 ≥ 冷却、当日 5 条 ≤ 日上限。
 - 文档：新增 `docs/PHASE1_REPORT.md`；README 补「主动消息 v2」说明与 11 个新配置键。
 - 阶段零产物：`docs/PHASE0_RESEARCH.md`（Sentipolis/GWA/Mem0 论文与 API 核实）、`docs/PHASE0_CURRENT_STATE.md`（现网调度链路与爆发根因）、`docs/PHASE0_MEMO.md`（工程备忘录）、`docs/PHASE0_PERSONA.md`（人格改写说明）、`assets/persona.json`、`assets/worldview.json`、`assets/persona_source/`（原字节存档 + MANIFEST）。
+
+## v1.2.1（2026-10-28）
+
+### 🔍 主动消息 v2 可观测性 + 启动状态持久化
+
+**问题**：
+1. 开启 `living_enabled` 后，从外部（服务器日志 / 状态文件）看不出调度器是否真的在跑：启动时 `_living_start()` 只注册了 job 却**没有把下一次决策时间写回状态文件**，`proactive_state.json` 里 `next_decision_at` 一直是 0，看起来像「没排上」。
+2. 没有在聊天里自查的入口，用户无法确认「下次什么时候会主动说话、今天已经说了几条」。
+
+**改动**：
+- `_living_start()` 在注册每个会话的决策 job 时，把算好的 `next_decision_at` 写回状态并落盘（与 job 实际触发时间一致，重启后恢复不漂移）。
+- 新增 `/主动状态`（别名 `/主动消息状态`）命令：输出调度器是否运行、每个会话的「最后互动 / 待触发意图与时间 / 下次决策时间 / 今日已发条数 / 最近 5 条决策记录」。
+- 关闭 `living_enabled` 时该命令明确提示「走旧版每日计划发送」，不会误导。
+
+**其它**：`py tests/test_living.py` 12 组、`py tests/test_merged.py` 24 组全过。
