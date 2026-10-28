@@ -462,3 +462,27 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 ### 其它
 - tests 新增 `[24f]`（astral 字符 / 变体选择符 / ZWJ 全部剔除，正文文字保留）。
 - `metadata.yaml` 1.1.7 → 1.1.8。
+
+## v1.2.0（2026-10-25）
+
+### 🎯 主动消息 v2（阶段一）：插件内部调度器 + 单会话决策循环
+
+**问题**：旧实现是「每天 03:20 预生成明天 5-10 条 → 每分钟检查 → 到点发送」，有两个结构性缺陷：
+1. **消息「一下子出来一大串」**：`_dispatch_due()` 会把 `missed_grace_minutes`（默认 30 分钟）窗口内所有过期条目在同一 tick 里逐条发出（间隔 0.3s），整轮结束才写回 KV；叠加 `_dispatch_due` 无锁、`cron_manager.add_basic_job` 不幂等（每次新 job_id）导致两套分钟任务并存，一次停机后可连发多条。复现：6 条计划 + 停机 23 分钟 → 单 tick 连发 6 条。
+2. **内容与当下脱节**：正文在凌晨就生成好，早晨发出去的其实是「昨晚的情绪 + 昨晚的记忆」。
+
+**改动**（新增 `living_*` 11 个配置项，默认关闭，关闭时行为与 v1.1.8 完全一致）：
+- 插件内部 `AsyncIOScheduler`：`initialize()` 启动、`terminate()` 清 job 并 `shutdown(wait=False)`；开启后**完全不注册** AstrBot `cron_manager`（不依赖内置任务系统）。
+- **每会话一个决策 job**（`proactive_decision_<sid>`，`replace_existing/coalesce/max_instances=1/misfire_grace_time=120`），决策完自己排下一次（自我延续），无外部节拍。
+- **两阶段生成**：决策只产「意图标签 + 触发时间偏移」，到点的一次性 job 才读当下记忆/人格/世界观生成正文（不预生成）。
+- **单槽 + token 幂等**：同一会话最多一个待触发；同一 token 重复触发只发 1 条；过期待触发（停机/休眠导致）**直接丢弃不补发**——从此不存在「补发批量」。
+- 每会话一把 `asyncio.Lock` 覆盖「决策→生成→发送」；状态落 `<data>/proactive_state.json`（`os.replace` 原子写），重启恢复，损坏文件降级为空状态。
+- 时间逻辑：`living_quiet_hours`（默认 23:30-07:30，支持跨午夜/off）内不触发，计划落在时段内自动顺延 +5~25 分钟；沉默下限 / 冷却 / 日上限 / 概率斜坡（`living_ramp_minutes`）四道门禁；时段词分八档注入提示词。
+- 人格与世界观**固化为插件内置资源** `assets/persona.json`、`assets/worldview.json`（含 `tsundere.forbidden_meta_phrases`），运行时只读仓库内 JSON，不读服务器人格文件、不做同步/热更新。
+- 最小硬约束：正文命中「才不是特意 / 我才没有 / 又不是为了你 / 别误会」或「作为 AI / 语言模型」直接丢弃本条。
+
+**其它**：
+- `_conf_schema.json` 110 → 121 键；`py tests/test_living.py` 12 组（含「100 次重复触发 = 1 条」「100 个周期 = 100 条」）；`py tests/test_merged.py` 24 组回归全过。
+- 一整天模拟（含两次用户回话）验证：安静时段 0 条、相邻间隔均 ≥ 冷却、当日 5 条 ≤ 日上限。
+- 文档：新增 `docs/PHASE1_REPORT.md`；README 补「主动消息 v2」说明与 11 个新配置键。
+- 阶段零产物：`docs/PHASE0_RESEARCH.md`（Sentipolis/GWA/Mem0 论文与 API 核实）、`docs/PHASE0_CURRENT_STATE.md`（现网调度链路与爆发根因）、`docs/PHASE0_MEMO.md`（工程备忘录）、`docs/PHASE0_PERSONA.md`（人格改写说明）、`assets/persona.json`、`assets/worldview.json`、`assets/persona_source/`（原字节存档 + MANIFEST）。

@@ -443,6 +443,61 @@
     "default": true,
     "description": "【主动门禁/人格消息】未指定 pg_target_sessions 时：仅发送给私聊会话（好友/私聊），不发送到群聊"
   },
+  "living_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "【主动消息 v2 / 阶段一】启用「单会话决策循环」：插件内部 AsyncIOScheduler 驱动，每个会话一个决策 job，只在触发时刻才生成正文（不预生成、不补发）。开启后旧的「每日预生成计划 + 每分钟派发」自动停用"
+  },
+  "living_min_silence_minutes": {
+    "type": "int",
+    "default": 90,
+    "description": "【主动消息 v2】沉默下限（分钟）：距离上次互动不到这么久，绝不主动开口"
+  },
+  "living_cooldown_minutes": {
+    "type": "int",
+    "default": 180,
+    "description": "【主动消息 v2】冷却（分钟）：主动发过一条后，至少隔这么久才可能再发；用户回话也会把下次决策推后同样时长"
+  },
+  "living_daily_max": {
+    "type": "int",
+    "default": 6,
+    "description": "【主动消息 v2】每个会话每天最多主动发几条（硬上限，防夜间刷屏）"
+  },
+  "living_quiet_hours": {
+    "type": "string",
+    "default": "23:30-07:30",
+    "description": "【主动消息 v2】安静时段（HH:MM-HH:MM，可跨午夜）：时段内不触发；若计划触发时间落在里面，顺延到时段结束后 5~25 分钟。留空或写 off 表示不限制"
+  },
+  "living_offset_min": {
+    "type": "int",
+    "default": 5,
+    "description": "【主动消息 v2】决策到实际发送的最小随机延迟（分钟）：避免「决定完立刻发」的机械感"
+  },
+  "living_offset_max": {
+    "type": "int",
+    "default": 45,
+    "description": "【主动消息 v2】决策到实际发送的最大随机延迟（分钟）"
+  },
+  "living_ramp_minutes": {
+    "type": "int",
+    "default": 240,
+    "description": "【主动消息 v2】概率斜坡（分钟）：沉默时长超过下限后，再每多这么久触发概率线性上升一格，最终到 100%（避免固定节拍）"
+  },
+  "living_decision_check_minutes": {
+    "type": "int",
+    "default": 10,
+    "description": "【主动消息 v2】决策检查间隔（分钟）：每次决策未通过门禁时，隔这么久再检查一次"
+  },
+  "living_persona_chars": {
+    "type": "int",
+    "default": 2400,
+    "description": "【主动消息 v2】注入提示词的人格片段字数上限（来自插件内置 assets/persona.json）"
+  },
+  "living_worldview_chars": {
+    "type": "int",
+    "default": 1200,
+    "description": "【主动消息 v2】注入提示词的世界观片段字数上限（来自插件内置 assets/worldview.json）"
+  },
   "meme_enabled": {
     "type": "bool",
     "default": true,

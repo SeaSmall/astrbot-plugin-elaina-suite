@@ -1,0 +1,184 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "persona_source_manifest",
+  "generated_at": "2026-10-28T18:45:00+08:00",
+  "generated_by": "phase0-c/persona-forger",
+  "server": "ssh.example.com:22 (user alice), container astrbot, AstrBot data root /opt/astrbot/data",
+  "primary_document": "assets/persona_source/astrbot_db/personas/elaina_v2.system_prompt.txt",
+  "supplementary": [
+    "assets/persona_source/elaina-agent/assets/openclaw-workspace/PERSONA_ELAINA.md",
+    "assets/persona_source/ex-skill/exes/elaina/persona.md"
+  ],
+  "runtime_policy": "本目录只作开发阶段存档：运行时不得读取、不得比对哈希、不得热更新。人格与世界观已固化在 assets/persona.json 与 assets/worldview.json。",
+  "excluded": [
+    {
+      "remote_path": "/opt/astrbot/data/config/astrbot_plugin_elaina_suite_config.json",
+      "reason": "文件含 provider API key 等敏感信息，不入库存档；仅在 docs/PHASE0_PERSONA.md 记录关键证据：persona 与 world_setting 两个键为空字符串"
+    }
+  ],
+  "count": 18,
+  "files": [
+    {
+      "path": "assets/persona_source/astrbot_db/personas/elaina.system_prompt.txt",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas(persona_id=elaina).system_prompt",
+      "bytes": 10704,
+      "sha256": "3486fbf1d1cbc2020f72235684a38d4ca269d27bec8e7e08b345ad8661319529",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "上一版人格 system_prompt（4102 字符），被 elaina_v2 取代，仅存档"
+    },
+    {
+      "path": "assets/persona_source/astrbot_db/personas/elaina.begin_dialogs.txt",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas(persona_id=elaina).begin_dialogs",
+      "bytes": 1032,
+      "sha256": "aceb31e27085906baa9c73947782cb64641d11b787c55da34f361caaffb3a803",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "上一版人格的 12 条示例对白原字节"
+    },
+    {
+      "path": "assets/persona_source/astrbot_db/personas/elaina_v2.system_prompt.txt",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas(persona_id=elaina_v2).system_prompt",
+      "bytes": 17564,
+      "sha256": "d3eea3571123299b7a21856d8b257606ea806832ff547058312422efe8812771",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "【主文档】v2 融合版人格设定（6588 字符，193 行），当前运行时实际生效的人格"
+    },
+    {
+      "path": "assets/persona_source/astrbot_db/personas/elaina_v2.begin_dialogs.txt",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas(persona_id=elaina_v2).begin_dialogs",
+      "bytes": 1610,
+      "sha256": "28fe2db3b82fb4941284692850368bc7ebd30f9ff689b7d5170d6792e8848a3c",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "主文档配套 20 条示例对白原字节，persona.json 以 dialogs#N 引用"
+    },
+    {
+      "path": "assets/persona_source/astrbot_db/personas/elaina_v2_notools.system_prompt.txt",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas(persona_id=elaina_v2_notools).system_prompt",
+      "bytes": 17564,
+      "sha256": "d3eea3571123299b7a21856d8b257606ea806832ff547058312422efe8812771",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "与 elaina_v2 的 prompt 字节完全相同（sha 一致），仅 tools/skills 配置不同"
+    },
+    {
+      "path": "assets/persona_source/astrbot_db/personas/elaina_v2_notools.begin_dialogs.txt",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas(persona_id=elaina_v2_notools).begin_dialogs",
+      "bytes": 1610,
+      "sha256": "28fe2db3b82fb4941284692850368bc7ebd30f9ff689b7d5170d6792e8848a3c",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "与 elaina_v2 的示例对白字节完全相同"
+    },
+    {
+      "path": "assets/persona_source/astrbot_db/personas_table.dump.json",
+      "remote_source": "/opt/astrbot/data/data_v4.db :: personas 表全量导出",
+      "bytes": 53074,
+      "sha256": "e0f217adcf149f5e49036ef6bec62532b13b0a71bc5c2b7cee3e1a214a3348ec",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "三行人格的完整字段（含 tools/skills/custom_error_message 等），作交叉核验"
+    },
+    {
+      "path": "assets/persona_source/elaina-agent/SKILL.md",
+      "remote_source": "/opt/astrbot/data/skills/elaina-agent/SKILL.md",
+      "bytes": 23427,
+      "sha256": "e73bdc9ae72f934fb7bd05113c399a4dca22b7c2bfdac905ef93487272136649",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "elaina-agent 运行协议与正典检索规则（非人格正文）"
+    },
+    {
+      "path": "assets/persona_source/elaina-agent/assets/openclaw-workspace/PERSONA_ELAINA.md",
+      "remote_source": "/opt/astrbot/data/skills/elaina-agent/assets/openclaw-workspace/PERSONA_ELAINA.md",
+      "bytes": 7335,
+      "sha256": "01ae37a38a882466648154fd73a493a0c1670c62818d7f882820fcea285680b5",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "【辅助源】正典核验档案（77 行，自述对照 296 篇原文核验），补齐人物关系与证伪清单"
+    },
+    {
+      "path": "assets/persona_source/elaina-agent/assets/openclaw-workspace/SOUL.md",
+      "remote_source": "/opt/astrbot/data/skills/elaina-agent/assets/openclaw-workspace/SOUL.md",
+      "bytes": 1901,
+      "sha256": "c6179b9c4677b60a9d64cf1c8e088b84db384589efe658a011120e11d2739153",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "精简人设（16 行）：核心气质与说话硬约束"
+    },
+    {
+      "path": "assets/persona_source/elaina-agent/assets/openclaw-workspace/IDENTITY.md",
+      "remote_source": "/opt/astrbot/data/skills/elaina-agent/assets/openclaw-workspace/IDENTITY.md",
+      "bytes": 749,
+      "sha256": "1a9ccb96294a02e8b9caffbdd47240830edafd1d2e60a9b6841af2a228aa370a",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "宿主身份定义（19 行）；与主文档「禁自称 AI」冲突，仅作参考"
+    },
+    {
+      "path": "assets/persona_source/elaina-agent/assets/openclaw-workspace/RUNTIME_GUARD.md",
+      "remote_source": "/opt/astrbot/data/skills/elaina-agent/assets/openclaw-workspace/RUNTIME_GUARD.md",
+      "bytes": 1629,
+      "sha256": "725becc9988de53771bb80658a0f4f09dcbef3c69d112bdb413a53176636706f",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "运行时功能约束（10 行）：静默检索、引号对白须逐字确认"
+    },
+    {
+      "path": "assets/persona_source/elaina-agent/assets/openclaw-workspace/AGENTS.md",
+      "remote_source": "/opt/astrbot/data/skills/elaina-agent/assets/openclaw-workspace/AGENTS.md",
+      "bytes": 14568,
+      "sha256": "0e18c9cd3f8e7bda4fff3dac3a90725e4d108b95958c4d13953c14222fdf1341",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "OpenClaw 工作区操作规范（14.5K，非人格设定，仅作边界参考）"
+    },
+    {
+      "path": "assets/persona_source/ex-skill/exes/elaina/persona.md",
+      "remote_source": "/opt/astrbot/data/skills/ex-skill/exes/elaina/persona.md",
+      "bytes": 5779,
+      "sha256": "6c721f178438a001b6a7b7532f9af645ea1d18ec2d7d67a2e0a912155b95fe0e",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "【辅助源】早期「前任.skill」五层人格（136 行）：傲娇原型句、口头禅、雷区；含与主文档冲突的 emoji 禁令"
+    },
+    {
+      "path": "assets/persona_source/ex-skill/exes/elaina/memories.md",
+      "remote_source": "/opt/astrbot/data/skills/ex-skill/exes/elaina/memories.md",
+      "bytes": 4492,
+      "sha256": "3680f782b254bb7c2943491cd3a789fe9177566c28b35377ab963e20bfbbf1a3",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "早期人格的「共同记忆」段（面包、黄昏登高等日常）"
+    },
+    {
+      "path": "assets/persona_source/ex-skill/exes/elaina/meta.json",
+      "remote_source": "/opt/astrbot/data/skills/ex-skill/exes/elaina/meta.json",
+      "bytes": 903,
+      "sha256": "4708f8e5a1d4b199bd1db289c64b5f9bcf84938bc8ad9b8dedbb4839bd042a93",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "早期人格元信息：MBTI ENTJ、天秤座、personality 标签"
+    },
+    {
+      "path": "assets/persona_source/ex-skill/exes/elaina/SKILL.md",
+      "remote_source": "/opt/astrbot/data/skills/ex-skill/exes/elaina/SKILL.md",
+      "bytes": 11745,
+      "sha256": "6c5705cd6ba693fcc14d66bb2cbe4ceff3c196cbac9933fed30e08ce98db883d",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "早期人格 Skill 全文（PART A 共同记忆 + PART B persona 原文）"
+    },
+    {
+      "path": "assets/persona_source/ex-skill/prompts/persona_builder.md",
+      "remote_source": "/opt/astrbot/data/skills/ex-skill/prompts/persona_builder.md",
+      "bytes": 5005,
+      "sha256": "cc331bff7d8021d34812f3ad366085ea43074fc25927b33407ba4922c9d017cd",
+      "encoding": "utf-8",
+      "bom": false,
+      "note": "五层人格生成模板（Layer0-Layer5），解释 t1 人格的生成方式"
+    }
+  ]
+}

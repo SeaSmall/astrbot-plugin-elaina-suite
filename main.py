@@ -561,6 +561,66 @@ def _ensure_cjk_font() -> str | None:
         return None
 
 
+# ===========================================================================
+# 插件内置人格资源（阶段一B）
+# 开发期把服务器上的人格设定文档（含世界观）一次性改写为脚本同级的
+# assets/persona.json 与 assets/worldview.json；运行期只读插件自带文件：
+# 不读服务器原文档、不做哈希比对、不做热更新。要改人格走开发流程发新版本。
+# ===========================================================================
+PERSONA_ASSET = os.path.join("assets", "persona.json")
+WORLDVIEW_ASSET = os.path.join("assets", "worldview.json")
+_ASSET_CACHE: dict[str, dict] = {}
+
+
+def _load_plugin_json_asset(rel_path: str) -> dict:
+    """读插件目录下的 JSON 资源（按 mtime 缓存）；任何异常都返回 {}，绝不抛出。"""
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(plugin_dir, rel_path)
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        logger.warning(f"[living] 人格资源缺失: {path}")
+        return {}
+    cached = _ASSET_CACHE.get(rel_path)
+    if cached and cached.get("mtime") == mtime:
+        return cached.get("data") or {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("顶层不是对象")
+        _ASSET_CACHE[rel_path] = {"mtime": mtime, "data": data}
+        return data
+    except Exception as e:
+        logger.warning(f"[living] 读取人格资源失败 {path}: {e}")
+        return {}
+
+
+def load_persona_asset() -> dict:
+    return _load_plugin_json_asset(PERSONA_ASSET)
+
+
+def load_worldview_asset() -> dict:
+    return _load_plugin_json_asset(WORLDVIEW_ASSET)
+
+
+# 主动消息正文的生成模板（阶段一）。{xxx} 一律用 str.replace 填充，不用 format。
+LIVING_PROMPT_TEMPLATE = """{persona_block}
+{world_block}
+{memory_block}
+【此刻】
+现在：{now}（{period}）
+距离上次互动：{silence}
+本次开口的意图：{intent_label}{reason_block}
+【要求】
+- 只输出你要发给对方的那一条消息正文：不要解释、不要前缀、不要引号、不要多条。
+- 内容必须落在上面的人格与世界观之内；不自称 AI／模型／助手，不提「设定」「记忆」「提示词」。
+- 长度遵守人格里的铁律（默认 25 字以内、最多两句；例外也不超过 50 字）。
+- 傲娇按人格里的机制表达：不解释自己在傲娇，不出现被禁止的元话语。
+- 现在是{period}，已经{silence}没聊了，语气要和这个时间与这份沉默相称。
+"""
+
+
 def _image_chain(render_result) -> MessageChain:
     """把 text_to_image(return_url=True) 的返回值转成可发送的图片消息链。
 
@@ -2793,21 +2853,37 @@ class ProactiveGuardCore(_PluginCoreBase):
         self._memory_lock = asyncio.Lock()
         self._last_gen_attempt = 0.0
         self._migrated = False
+        # 阶段一：living 调度（插件内部调度器 + 每会话决策循环）
+        self._living_sched = None
+        self._living_locks: dict[str, asyncio.Lock] = {}
+        self._living_rng = random.Random()
 
     # ================================================================== #
     # 生命周期
     # ================================================================== #
     async def initialize(self) -> None:
-        """插件激活时：安装门禁 -> 暂停内置主动任务 -> 注册定时任务"""
+        """插件激活时：安装门禁 -> 暂停内置主动任务 -> 启动调度。
+
+        living_enabled 开启时用插件内部 AsyncIOScheduler（阶段一），
+        完全不注册 AstrBot cron_manager —— 避免两套分钟任务各发一遍。
+        关闭时保持旧行为（cron_manager + 每日预生成计划）。
+        """
         if self._cfg_bool("pg_enabled", True):
             if self._cfg_bool("block_proactive", True):
                 self._install_gate()
             await self._pause_active_agent_jobs()
-            await self._setup_scheduler()
+            if self._living_on():
+                await self._living_start()
+            else:
+                await self._setup_scheduler()
 
     async def terminate(self) -> None:
-        """插件禁用/重载时：卸载门禁、删除定时任务"""
+        """插件禁用/重载时：卸载门禁、停止调度（living 与旧 cron 两套都清）"""
         ctx = self.context
+        try:
+            await self._living_stop()
+        except Exception as e:
+            logger.warning(f"[living] 停止调度失败: {e}")
         if getattr(ctx, "_proactive_guard_installed", False):
             try:
                 ctx.send_message = self._orig_send_message
@@ -2916,6 +2992,9 @@ class ProactiveGuardCore(_PluginCoreBase):
                         self._last_user_activity.items(), key=lambda kv: kv[1]
                     )
                     self._last_user_activity = dict(items[len(items) // 2 :])
+                # 阶段一：把用户活跃喂给 living 决策循环（取消待触发 + 推后下次决策）
+                if self._living_on():
+                    await self._living_on_user_message(umo)
         except Exception:
             pass
 
@@ -4427,6 +4506,748 @@ class ProactiveGuardCore(_PluginCoreBase):
         if cur:
             chunks.append(cur)
         return chunks
+
+    # ================================================================== #
+    # 阶段一：插件内部「单会话决策循环」主动消息（living_*）
+    # 契约见 docs/PHASE0_MEMO.md §4：
+    #   · 只用插件内部 AsyncIOScheduler，不注册 AstrBot cron_manager；
+    #   · 每个会话一个决策 job（proactive_decision_<sid>，replace_existing），
+    #     决策完自己排下一次 —— 自我延续，无外部节拍；
+    #   · 两阶段：决策只产「意图 + 时间偏移」，触发时才读当下记忆生成正文；
+    #   · 同一会话同一时刻最多一个待触发（proactive_fire_<sid> 单槽 + token 幂等）；
+    #   · 每会话一把 asyncio.Lock 覆盖 决策→生成→发送；
+    #   · 状态落 <data>/proactive_state.json（原子写），重启恢复、过期待触发丢弃不补发。
+    # ================================================================== #
+    def _living_on(self) -> bool:
+        return self._cfg_bool("living_enabled", False)
+
+    def _living_state_file(self) -> Path | None:
+        data_dir = _plugin_data_dir()
+        if not data_dir:
+            return None
+        return Path(data_dir) / "proactive_state.json"
+
+    @staticmethod
+    def _living_sid(umo: str) -> str:
+        return re.sub(r"[^0-9A-Za-z_]+", "_", str(umo or "unknown"))[:80]
+
+    def _living_lock(self, umo: str) -> asyncio.Lock:
+        lock = self._living_locks.get(umo)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._living_locks[umo] = lock
+        return lock
+
+    async def _living_load(self) -> dict:
+        path = self._living_state_file()
+        empty = {"version": 2, "sessions": {}}
+        if path is None:
+            return empty
+        try:
+            if not path.exists():
+                return empty
+            raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("state 顶层不是对象")
+            data.setdefault("version", 2)
+            if not isinstance(data.get("sessions"), dict):
+                data["sessions"] = {}
+            return data
+        except Exception as e:
+            logger.warning(f"[living] 读取状态失败，按空状态继续: {e}")
+            return empty
+
+    async def _living_save(self, state: dict) -> None:
+        path = self._living_state_file()
+        if path is None:
+            return
+        try:
+            payload = json.dumps(state, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[living] 状态序列化失败: {e}")
+            return
+
+        def _write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.part")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp, path)
+
+        try:
+            await asyncio.to_thread(_write)
+        except Exception as e:
+            logger.warning(f"[living] 保存状态失败: {e}")
+
+    def _living_sstate(self, state: dict, umo: str) -> dict:
+        s = state["sessions"].get(umo)
+        if not isinstance(s, dict):
+            s = {}
+            state["sessions"][umo] = s
+        s.setdefault("last_user_at", 0.0)
+        s.setdefault("last_proactive_at", 0.0)
+        s.setdefault("sent_date", "")
+        s.setdefault("sent_today", 0)
+        s.setdefault("next_decision_at", 0.0)
+        s.setdefault("pending", None)
+        if not isinstance(s.get("history"), list):
+            s["history"] = []
+        return s
+
+    def _living_log(self, s: dict, kind: str, detail: str = "") -> None:
+        s.setdefault("history", []).append(
+            {"ts": round(time.time(), 1), "kind": kind, "detail": str(detail)[:200]}
+        )
+        hist = s["history"]
+        if len(hist) > 40:
+            del hist[: len(hist) - 40]
+
+    # ------------------------------ 时间 ------------------------------ #
+    def _living_tz(self):
+        tz_name = str(self.config.get("pg_timezone") or "Asia/Shanghai").strip()
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(tz_name)
+        except Exception:
+            return None
+
+    def _living_now(self) -> datetime:
+        tz = self._living_tz()
+        return datetime.now(tz) if tz else datetime.now()
+
+    def _living_dt(self, ts: float) -> datetime:
+        tz = self._living_tz()
+        return datetime.fromtimestamp(ts, tz) if tz else datetime.fromtimestamp(ts)
+
+    def _living_quiet_range(self) -> tuple[int, int] | None:
+        raw = str(self.config.get("living_quiet_hours") or "23:30-07:30").strip()
+        if not raw or raw.lower() in ("off", "none", "0"):
+            return None
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$", raw)
+        if not m:
+            return None
+        try:
+            start = int(m.group(1)) * 60 + int(m.group(2))
+            end = int(m.group(3)) * 60 + int(m.group(4))
+        except Exception:
+            return None
+        if start == end:
+            return None
+        return start, end
+
+    def _living_in_quiet(self, dt: datetime) -> bool:
+        rng = self._living_quiet_range()
+        if rng is None:
+            return False
+        start, end = rng
+        cur = dt.hour * 60 + dt.minute
+        if start < end:
+            return start <= cur < end
+        return cur >= start or cur < end
+
+    def _living_quiet_end_after(self, dt: datetime) -> datetime:
+        rng = self._living_quiet_range()
+        if rng is None:
+            return dt
+        _start, end = rng
+        out = dt.replace(hour=end // 60, minute=end % 60, second=0, microsecond=0)
+        if out <= dt:
+            out = out + timedelta(days=1)
+        return out
+
+    @staticmethod
+    def _living_period(dt: datetime) -> str:
+        h = dt.hour
+        if h < 5:
+            return "深夜"
+        if h < 8:
+            return "清晨"
+        if h < 11:
+            return "上午"
+        if h < 13:
+            return "中午"
+        if h < 17:
+            return "下午"
+        if h < 19:
+            return "傍晚"
+        if h < 23:
+            return "晚上"
+        return "夜里"
+
+    @staticmethod
+    def _living_human_gap(minutes: float) -> str:
+        m = max(1, int(minutes))
+        if m < 60:
+            return f"{m} 分钟"
+        if m < 1440:
+            return f"{m // 60} 小时"
+        return f"{m // 1440} 天"
+
+    # ---------------------------- 调度原语 ---------------------------- #
+    def _living_add_date_job(self, func, run_ts: float, args: list, job_id: str) -> None:
+        sched = getattr(self, "_living_sched", None)
+        if sched is None or not getattr(sched, "running", False):
+            logger.debug("[living] 调度器未运行，跳过注册 job")
+            return
+        try:
+            from apscheduler.triggers.date import DateTrigger
+
+            sched.add_job(
+                func,
+                DateTrigger(run_date=self._living_dt(max(run_ts, time.time() + 1))),
+                args=args,
+                id=job_id,
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=120,
+            )
+        except Exception as e:
+            logger.warning(f"[living] 注册 job 失败 {job_id}: {e}")
+
+    async def _living_schedule_decision(self, umo: str, when_ts: float | None = None) -> None:
+        state = await self._living_load()
+        s = self._living_sstate(state, umo)
+        now = time.time()
+        if when_ts is None:
+            check = max(1, self._cfg_int("living_decision_check_minutes", 10)) * 60
+            when_ts = now + check + self._living_rng.randint(0, max(1, check // 3))
+        when_ts = max(float(when_ts), now + 15)
+        s["next_decision_at"] = when_ts
+        await self._living_save(state)
+        self._living_add_date_job(
+            self._living_decision_tick,
+            when_ts,
+            [umo],
+            f"proactive_decision_{self._living_sid(umo)}",
+        )
+
+    async def _living_start(self) -> None:
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        except Exception as e:
+            logger.error(f"[living] 无法导入 APScheduler，主动消息 v2 不可用: {e}")
+            return
+        tz = self._living_tz()
+        sched = AsyncIOScheduler(timezone=tz) if tz is not None else AsyncIOScheduler()
+        try:
+            sched.start()
+        except Exception as e:
+            logger.error(f"[living] 调度器启动失败: {e}")
+            return
+        self._living_sched = sched
+        now = time.time()
+        state = await self._living_load()
+        sessions = await self._collect_target_sessions()
+        for umo in sessions:
+            s = self._living_sstate(state, umo)
+            if not float(s.get("last_user_at") or 0):
+                # 基线：从现在开始算沉默，避免一上线就对沉默很久的会话开口
+                s["last_user_at"] = now
+        await self._living_save(state)
+        for umo in sessions:
+            s = state["sessions"].get(umo) or {}
+            nxt = float(s.get("next_decision_at") or 0)
+            if nxt <= now:
+                nxt = now + self._living_rng.randint(120, 600)
+            self._living_add_date_job(
+                self._living_decision_tick,
+                nxt,
+                [umo],
+                f"proactive_decision_{self._living_sid(umo)}",
+            )
+        if self._cfg_bool("memory_enabled", True):
+            await self._living_schedule_memory()
+        logger.info(
+            f"[living] 主动消息 v2 调度已启动：{len(sessions)} 个会话"
+            "（插件内部 AsyncIOScheduler，不依赖 cron_manager）"
+        )
+
+    async def _living_schedule_memory(self) -> None:
+        sched = getattr(self, "_living_sched", None)
+        if sched is None:
+            return
+        cron = str(self.config.get("memory_cron") or "0 3 * * *").strip()
+        tz = self._living_tz()
+        try:
+            from apscheduler.triggers.cron import CronTrigger
+
+            trigger = (
+                CronTrigger.from_crontab(cron, timezone=tz)
+                if tz is not None
+                else CronTrigger.from_crontab(cron)
+            )
+            sched.add_job(
+                self._on_memory_time,
+                trigger,
+                id="living_memory",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=600,
+            )
+        except Exception as e:
+            logger.warning(f"[living] 记忆任务注册失败: {e}")
+
+    async def _living_stop(self) -> None:
+        sched = getattr(self, "_living_sched", None)
+        self._living_sched = None
+        if sched is None:
+            return
+        try:
+            sched.remove_all_jobs()
+        except Exception:
+            pass
+        try:
+            sched.shutdown(wait=False)
+            logger.info("[living] 主动消息 v2 调度已停止")
+        except Exception as e:
+            logger.warning(f"[living] 调度器关闭失败: {e}")
+
+    # ---------------------------- 决策阶段 ---------------------------- #
+    def _living_should_initiate(self, umo: str, s: dict, now_ts: float) -> tuple[bool, str]:
+        """决策 tick 的门禁：沉默偏离 / 冷却 / 日上限 / 安静时段 / 概率斜坡。"""
+        if not self._living_on():
+            return False, "living 未开启"
+        last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
+        if last <= 0:
+            return False, "没有交互基线"
+        silence_min = (now_ts - last) / 60.0
+        min_sil = max(1, self._cfg_int("living_min_silence_minutes", 90))
+        if silence_min < min_sil:
+            return False, f"沉默 {silence_min:.0f} 分钟 < 下限 {min_sil}"
+        cooldown = max(1, self._cfg_int("living_cooldown_minutes", 180))
+        last_pro = float(s.get("last_proactive_at") or 0)
+        if last_pro and now_ts - last_pro < cooldown * 60:
+            return False, "冷却中"
+        now_dt = self._living_dt(now_ts)
+        if self._living_in_quiet(now_dt):
+            return False, "安静时段"
+        today = now_dt.strftime("%Y-%m-%d")
+        if s.get("sent_date") != today:
+            s["sent_date"] = today
+            s["sent_today"] = 0
+        daily_max = max(1, self._cfg_int("living_daily_max", 6))
+        if int(s.get("sent_today") or 0) >= daily_max:
+            return False, f"今日已发满 {daily_max} 条"
+        ramp = max(1, self._cfg_int("living_ramp_minutes", 240))
+        p = min(1.0, max(0.05, (silence_min - min_sil) / ramp))
+        if self._living_rng.random() > p:
+            return False, f"概率门未过（p={p:.2f}）"
+        return True, f"沉默 {silence_min:.0f} 分钟 / p={p:.2f}"
+
+    def _living_candidates(self, umo: str, s: dict, now_dt: datetime) -> list[dict]:
+        """候选意图池（阶段四会换成真正的评分-选择循环，这里先用可解释的启发式）。"""
+        ratio = max(0, min(100, self._share_ratio()))
+        share_w = max(0.1, ratio / 100.0)
+        care_w = max(0.1, 1.0 - ratio / 100.0)
+        hour = now_dt.hour
+        night = 1.0 if hour >= 21 or hour < 6 else 0.6
+        day = 1.0 if 9 <= hour <= 20 else 0.6
+        last_gap = max(
+            float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0)
+        )
+        silence_h = max(0.0, (now_dt.timestamp() - last_gap) / 3600.0)
+        out: list[dict] = [
+            {
+                "intent": "share",
+                "label": "分享自己正在经历的一件小事（世界观内，有画面）",
+                "score": 1.0 * share_w * day,
+                "reason": "沉默期间你去过/见过什么",
+            },
+            {
+                "intent": "care",
+                "label": "具体地关心对方的近况（要能说出由头）",
+                "score": 1.0 * care_w * night,
+                "reason": "记起了对方提过的事",
+            },
+            {
+                "intent": "followup",
+                "label": "追问之前没说完的话题",
+                "score": 0.55 * share_w,
+                "reason": "上次聊到一半的事",
+            },
+            {
+                "intent": "curiosity",
+                "label": "对对方提过的东西产生新的好奇",
+                "score": 0.45 * share_w,
+                "reason": "想不通的地方",
+            },
+        ]
+        if silence_h >= 6:
+            out.append(
+                {
+                    "intent": "check_in",
+                    "label": "试探性地确认对方还在不在（带点别扭，不直白示弱）",
+                    "score": 0.4 + 0.05 * min(6.0, silence_h - 6) + 0.2 * care_w,
+                    "reason": f"已经 {self._living_human_gap(silence_h * 60)}没动静",
+                }
+            )
+        return out
+
+    def _living_plan_intent(self, umo: str, s: dict, now_dt: datetime) -> dict:
+        cands = self._living_candidates(umo, s, now_dt)
+        if not cands:
+            return {}
+        best = max(cands, key=lambda c: float(c.get("score") or 0) * (0.8 + 0.4 * self._living_rng.random()))
+        off_min = max(1, self._cfg_int("living_offset_min", 5))
+        off_max = max(off_min + 1, self._cfg_int("living_offset_max", 45))
+        offset = self._living_rng.randint(off_min, off_max)
+        fire_dt = now_dt + timedelta(minutes=offset)
+        if self._living_in_quiet(fire_dt):
+            fire_dt = self._living_quiet_end_after(fire_dt) + timedelta(
+                minutes=self._living_rng.randint(5, 25)
+            )
+            offset = max(1, int((fire_dt - now_dt).total_seconds() // 60))
+        return {
+            "intent": str(best.get("intent") or "share"),
+            "label": str(best.get("label") or ""),
+            "reason": str(best.get("reason") or ""),
+            "offset_min": offset,
+            "fire_at": fire_dt.timestamp(),
+        }
+
+    async def _living_decide(self, umo: str) -> None:
+        if not self._living_on():
+            return
+        state = await self._living_load()
+        s = self._living_sstate(state, umo)
+        now_dt = self._living_now()
+        now = now_dt.timestamp()
+        pending = s.get("pending")
+        if isinstance(pending, dict) and float(pending.get("fire_at") or 0) > now - 5:
+            self._living_log(s, "skip", "已有待触发，等它执行")
+            await self._living_save(state)
+            await self._living_schedule_decision(umo, now + 300)
+            return
+        if isinstance(pending, dict):
+            # 过期待触发（进程休眠/停机所致）：直接丢弃，绝不补发
+            s["pending"] = None
+            self._living_log(s, "drop", "过期待触发已丢弃（不补发）")
+        ok, why = self._living_should_initiate(umo, s, now)
+        if not ok:
+            self._living_log(s, "skip", why)
+            await self._living_save(state)
+            await self._living_schedule_decision(umo)
+            return
+        plan = self._living_plan_intent(umo, s, now_dt)
+        if not plan:
+            self._living_log(s, "skip", "没有候选意图")
+            await self._living_save(state)
+            await self._living_schedule_decision(umo)
+            return
+        token = uuid.uuid4().hex
+        s["pending"] = {
+            "token": token,
+            "fire_at": float(plan["fire_at"]),
+            "intent": plan["intent"],
+            "label": plan["label"],
+            "reason": plan["reason"],
+            "created": now,
+        }
+        cooldown = max(1, self._cfg_int("living_cooldown_minutes", 180))
+        s["next_decision_at"] = float(plan["fire_at"]) + cooldown * 60
+        self._living_log(s, "plan", f"{plan['intent']}@+{plan['offset_min']}min")
+        await self._living_save(state)
+        self._living_add_date_job(
+            self._living_fire_tick,
+            float(plan["fire_at"]),
+            [umo, token],
+            f"proactive_fire_{self._living_sid(umo)}",
+        )
+        self._living_add_date_job(
+            self._living_decision_tick,
+            float(s["next_decision_at"]),
+            [umo],
+            f"proactive_decision_{self._living_sid(umo)}",
+        )
+        logger.info(
+            f"[living] {umo} 决定主动：{plan['label']}（{plan['offset_min']} 分钟后触发）"
+        )
+
+    async def _living_decision_tick(self, umo: str) -> None:
+        async with self._living_lock(umo):
+            try:
+                await self._living_decide(umo)
+            except Exception as e:
+                logger.error(f"[living] 决策失败 {umo}: {e}", exc_info=True)
+                try:
+                    await self._living_schedule_decision(umo)
+                except Exception:
+                    pass
+
+    # ---------------------------- 触发阶段 ---------------------------- #
+    async def _living_persona_block(self) -> str:
+        p = load_persona_asset()
+        if not p:
+            return ""
+        chars = max(400, self._cfg_int("living_persona_chars", 2400))
+        lines: list[str] = []
+        dn = str(p.get("display_name") or p.get("name") or "")
+        title = str(p.get("title") or "")
+        if dn:
+            lines.append(f"【人格】你是{dn}{('（' + title + '）') if title else ''}。")
+        ident = p.get("identity")
+        if isinstance(ident, dict):
+            bits = [
+                str(ident.get(k))
+                for k in ("species", "origin", "age", "height_cm", "appearance")
+                if ident.get(k) not in (None, "")
+            ]
+            if bits:
+                lines.append("身份：" + "；".join(bits) + "。")
+            sref = ident.get("self_reference")
+            if isinstance(sref, dict) and sref.get("default"):
+                extra = f"；自夸时用「{sref.get('boast')}」" if sref.get("boast") else ""
+                lines.append(f"自称：{sref.get('default')}{extra}。")
+            forb_ref = ident.get("forbidden_self_reference")
+            if isinstance(forb_ref, list) and forb_ref:
+                lines.append("不得自称：" + "、".join(str(x) for x in forb_ref[:8]) + "。")
+        traits = [t for t in (p.get("traits") or []) if isinstance(t, dict)]
+        if traits:
+            lines.append(
+                "性格：" + "；".join(f"{t.get('label')}——{t.get('summary')}" for t in traits[:6]) + "。"
+            )
+        tone = p.get("tone")
+        if isinstance(tone, dict):
+            if tone.get("register"):
+                lines.append("语气：" + str(tone["register"]) + "。")
+            lr = tone.get("length_rule")
+            if isinstance(lr, dict) and lr.get("hard_max_chars"):
+                lines.append(
+                    f"长度铁律：{lr.get('hard_max_chars')} 字以内（例外场景不超过 "
+                    f"{lr.get('exception_max_chars') or 50} 字）。"
+                )
+        habits = [h for h in (p.get("speech_habits") or []) if isinstance(h, dict)]
+        if habits:
+            lines.append("表达习惯：" + "；".join(str(h.get("habit") or "") for h in habits[:6]) + "。")
+        ts = p.get("tsundere")
+        if isinstance(ts, dict):
+            lines.append("【傲娇机制】（这是你表达的方式，不是要向对方解释的概念）")
+            negs = [
+                str(n.get("pattern"))
+                for n in (ts.get("negation_patterns") or [])
+                if isinstance(n, dict) and n.get("pattern")
+            ]
+            if negs:
+                lines.append("· 嘴硬时可以这样写：" + "；".join(negs[:3]))
+            leaks = [
+                str(l.get("mechanism"))
+                for l in (ts.get("care_leak_patterns") or [])
+                if isinstance(l, dict) and l.get("mechanism")
+            ]
+            if leaks:
+                lines.append("· 关心要以泄露的方式出现：" + "；".join(leaks[:3]))
+            forb = [
+                str(f.get("phrase") or f.get("id"))
+                for f in (ts.get("forbidden_meta_phrases") or [])
+                if isinstance(f, dict) and (f.get("phrase") or f.get("id"))
+            ]
+            if forb:
+                lines.append("· 绝对禁止（出现即判定失败）：" + "；".join(forb))
+        proh = [
+            str(x.get("rule"))
+            for x in (p.get("prohibitions") or [])
+            if isinstance(x, dict) and x.get("rule")
+        ]
+        if proh:
+            lines.append("禁令：" + "；".join(proh[:6]))
+        return "\n".join(lines)[:chars]
+
+    async def _living_world_block(self) -> str:
+        w = load_worldview_asset()
+        if not w:
+            return self._world_block()
+        chars = max(300, self._cfg_int("living_worldview_chars", 1200))
+        lines: list[str] = ["【世界观（你身处其中，不能说出设定外的概念）】"]
+        setting = w.get("setting")
+        if isinstance(setting, dict):
+            for key in ("era_style", "politics"):
+                if setting.get(key):
+                    lines.append(str(setting[key]))
+            tech = setting.get("technology")
+            if isinstance(tech, dict):
+                absent = tech.get("absent")
+                if isinstance(absent, list) and absent:
+                    lines.append(
+                        "这个世界没有：" + "、".join(str(x) for x in absent) + "（出现即世界观破产）。"
+                    )
+            magic = setting.get("magic")
+            if isinstance(magic, dict):
+                for key in ("association", "how_to_become_witch"):
+                    if magic.get(key):
+                        lines.append("魔法：" + str(magic[key]))
+        cons = [
+            str(c.get("constraint"))
+            for c in (w.get("environment_constraints") or [])
+            if isinstance(c, dict) and c.get("constraint") and c.get("type") == "in_world"
+        ]
+        if cons:
+            lines.append("可执行约束：" + "；".join(cons[:5]))
+        taboos = [
+            f"{t.get('topic')}（{t.get('handling') or '不主动提'}）"
+            for t in (w.get("taboo_topics") or [])
+            if isinstance(t, dict) and t.get("topic")
+        ]
+        if taboos:
+            lines.append("禁忌：" + "；".join(taboos[:5]))
+        return "\n".join(lines)[:chars]
+
+    async def _living_memory_block(self) -> str:
+        if not self._cfg_bool("memory_enabled", True):
+            return ""
+        try:
+            memory = await self._collect_memory()
+        except Exception as e:
+            logger.warning(f"[living] 取记忆失败: {e}")
+            return ""
+        if not memory:
+            return ""
+        try:
+            return MEMORY_BLOCK_TEMPLATE.format(memory=self._truncate_memory(memory))
+        except Exception:
+            return f"\n【关于对方，你记得的事】\n{self._truncate_memory(memory)}\n"
+
+    async def _living_compose(
+        self, umo: str, s: dict, intent: str, reason: str, now_dt: datetime
+    ) -> str:
+        persona_block = await self._living_persona_block()
+        world_block = await self._living_world_block()
+        memory_block = await self._living_memory_block()
+        last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
+        gap_min = max(1.0, (now_dt.timestamp() - last) / 60.0)
+        label = {
+            "share": "分享你自己的一件事",
+            "care": "具体地关心对方",
+            "followup": "追问之前没说完的话题",
+            "curiosity": "对对方提过的事产生新的好奇",
+            "check_in": "试探性地确认对方还在不在",
+        }.get(intent, intent)
+        prompt = LIVING_PROMPT_TEMPLATE
+        prompt = prompt.replace("{persona_block}", persona_block)
+        prompt = prompt.replace("{world_block}", world_block)
+        prompt = prompt.replace("{memory_block}", memory_block)
+        prompt = prompt.replace("{now}", now_dt.strftime("%H:%M"))
+        prompt = prompt.replace("{period}", self._living_period(now_dt))
+        prompt = prompt.replace("{silence}", self._living_human_gap(gap_min))
+        prompt = prompt.replace("{intent_label}", label)
+        prompt = prompt.replace(
+            "{reason_block}", f"（由头：{reason}）" if reason else ""
+        )
+        try:
+            raw = await self._llm_chat(prompt)
+        except Exception as e:
+            logger.warning(f"[living] 生成主动消息失败: {e}")
+            return ""
+        text = self._clean_message(raw)
+        if not text:
+            logger.warning("[living] 生成结果为空，本次放弃")
+            return ""
+        return self._living_check_text(text)
+
+    @staticmethod
+    def _living_check_text(text: str) -> str:
+        """阶段一的最小硬约束：命中「元话语式否定」就丢弃这条（阶段五升级为大模型审校）。"""
+        forbidden = ("才不是特意", "我才没有", "又不是为了你", "别误会")
+        if any(f in text for f in forbidden):
+            logger.info(f"[living] 命中元话语式否定，丢弃: {text[:40]}")
+            return ""
+        if "作为AI" in text or "作为一个AI" in text or "语言模型" in text:
+            logger.info(f"[living] 命中 AI 自称，丢弃: {text[:40]}")
+            return ""
+        return text
+
+    async def _living_fire(self, umo: str, token: str) -> None:
+        if not self._living_on():
+            return
+        state = await self._living_load()
+        s = self._living_sstate(state, umo)
+        pending = s.get("pending")
+        if not isinstance(pending, dict) or pending.get("token") != token:
+            logger.info(f"[living] 跳过过期触发（token 不匹配）: {umo}")
+            return
+        s["pending"] = None
+        created = float(pending.get("created") or 0)
+        if float(s.get("last_user_at") or 0) > created:
+            self._living_log(s, "skip", "用户已回话，本次放弃")
+            await self._living_save(state)
+            await self._living_schedule_decision(umo)
+            return
+        now_dt = self._living_now()
+        if self._living_in_quiet(now_dt):
+            self._living_log(s, "skip", "落在安静时段")
+            await self._living_save(state)
+            await self._living_schedule_decision(umo)
+            return
+        text = await self._living_compose(
+            umo,
+            s,
+            str(pending.get("intent") or "share"),
+            str(pending.get("reason") or ""),
+            now_dt,
+        )
+        if not text:
+            self._living_log(s, "skip", "生成失败或未过硬约束")
+            await self._living_save(state)
+            await self._living_schedule_decision(umo)
+            return
+        await self._send_silent(text, [umo])
+        today = now_dt.strftime("%Y-%m-%d")
+        if s.get("sent_date") != today:
+            s["sent_date"] = today
+            s["sent_today"] = 0
+        s["sent_today"] = int(s.get("sent_today") or 0) + 1
+        s["last_proactive_at"] = now_dt.timestamp()
+        self._living_log(s, "sent", f"{pending.get('intent')}: {text[:60]}")
+        await self._living_save(state)
+        logger.info(f"[living] 已发送主动消息（{umo}）：{text[:40]}")
+        cooldown = max(1, self._cfg_int("living_cooldown_minutes", 180))
+        await self._living_schedule_decision(umo, now_dt.timestamp() + cooldown * 60)
+
+    async def _living_fire_tick(self, umo: str, token: str) -> None:
+        async with self._living_lock(umo):
+            try:
+                await self._living_fire(umo, token)
+            except Exception as e:
+                logger.error(f"[living] 触发失败 {umo}: {e}", exc_info=True)
+
+    # ------------------------- 用户消息介入 ------------------------- #
+    async def _living_on_user_message(self, umo: str) -> None:
+        """用户回话：更新活跃基线、取消待触发、把下一次决策推到沉默下限之后。"""
+        if not self._living_on() or not umo:
+            return
+        try:
+            state = await self._living_load()
+            s = self._living_sstate(state, umo)
+            now = time.time()
+            s["last_user_at"] = now
+            if isinstance(s.get("pending"), dict):
+                s["pending"] = None
+                self._living_log(s, "cancel", "用户回话，取消待触发")
+            nxt = now + max(60, self._cfg_int("living_min_silence_minutes", 90) * 60)
+            s["next_decision_at"] = nxt
+            await self._living_save(state)
+            self._living_add_date_job(
+                self._living_decision_tick,
+                nxt,
+                [umo],
+                f"proactive_decision_{self._living_sid(umo)}",
+            )
+        except Exception as e:
+            logger.warning(f"[living] 记录用户活跃失败: {e}")
+
+    async def living_status(self) -> dict:
+        """给 /主动状态 命令与排障用：当前每个会话的调度状态。"""
+        state = await self._living_load()
+        return {
+            "enabled": self._living_on(),
+            "scheduler_running": bool(
+                getattr(getattr(self, "_living_sched", None), "running", False)
+            ),
+            "sessions": state.get("sessions") or {},
+        }
 
 # ===========================================================================
 # 核心四：Elaina 表情包（本地表情库 + AI 选图，对齐原版 astrbot_plugin_Elaina_meme_Bridge）
