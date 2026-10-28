@@ -501,3 +501,32 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - 关闭 `living_enabled` 时该命令明确提示「走旧版每日计划发送」，不会误导。
 
 **其它**：`py tests/test_living.py` 12 组、`py tests/test_merged.py` 24 组全过。
+
+## v1.3.0（2026-10-28）
+
+### 🧠 长期记忆（阶段二）：接入 mem0 —— 写入 / 召回 / 种子记忆
+
+**目标**：主动消息与对话不再只依赖「每天一次的记忆摘要」，而是有真正的长期记忆可写入、可召回；
+按官方文档接入 mem0，不自己实现向量库与事实抽取。
+
+**新增**：
+- 新增核心 `LivingMemoryCore`（mem0 薄封装）：懒加载 + 进程内单例 + `asyncio.to_thread`；
+  默认 `mem0_enabled=false`，关闭时行为与 v1.2.1 完全一致。
+- **写入**：用户消息与助手回复配成一轮进缓冲，攒够 `mem0_flush_turns`（默认 4）轮后后台批量写入
+  `user_id="u_<会话>"`；默认 `infer=False` 直接存原文（LLM 抽取单次约 13s 且可能写成英文）。
+- **召回**：主动消息生成时用「最近几条用户发言」查询 mem0，命中结果作为【你记得的事】块拼进提示词，
+  与原有 KV 记忆摘要并存（任一缺失都不影响）。
+- **种子记忆**：`worldview.json` 的 34 条世界观事实在首次启动写入 `user_id="elaina_world"`，幂等不重复写。
+- 新增 `/记忆状态`（别名 `/长期记忆状态`）命令：是否启用 / 是否就绪 / 种子是否已写 / 缓冲与后台任务数。
+- `_conf_schema.json` 121 → **132** 键（新增 11 个 `mem0_*` 配置）。
+- `requirements.txt` 新增依赖并钉版本：`numpy==1.26.4`（目标机 CPU 无 AVX，numpy 2.x 直接 SIGILL）、
+  `mem0ai==2.2.1`、`fastembed==0.9.1`。
+
+**约束与踩坑（已写进 docs/PHASE2_MEM0_PROBE.md / PHASE2_REPORT.md）**：
+- mem0 2.2.1 的 `search`/`get_all` 只接受 `filters={"user_id": ...}`，传顶层 `user_id` 直接 `ValueError`；
+- qdrant 嵌入式是**目录独占锁**，同进程第二个实例必炸 → 只能单例，`close()` 时先 `client.close()`；
+- 数据路径固定落 `<data>/mem0_qdrant`、`<data>/mem0_history.db`、`<data>/fastembed_cache`（91MB 模型，避免重下）；
+- 默认阈值从 mem0 的 0.1 提到 0.45（`mem0_threshold_pct`），否则无关记忆也会被召回。
+
+**其它**：新增 `tests/test_memory.py`（9 组，注入假 mem0 模块跑契约）；`tests/test_living.py` 12 组、
+`tests/test_merged.py` 24 组回归全过；文档新增 `docs/PHASE2_REPORT.md`。

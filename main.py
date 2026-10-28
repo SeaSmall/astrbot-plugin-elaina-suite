@@ -5097,27 +5097,45 @@ class ProactiveGuardCore(_PluginCoreBase):
             lines.append("禁忌：" + "；".join(taboos[:5]))
         return "\n".join(lines)[:chars]
 
-    async def _living_memory_block(self) -> str:
-        if not self._cfg_bool("memory_enabled", True):
-            return ""
-        try:
-            memory = await self._collect_memory()
-        except Exception as e:
-            logger.warning(f"[living] 取记忆失败: {e}")
-            return ""
-        if not memory:
-            return ""
-        try:
-            return MEMORY_BLOCK_TEMPLATE.format(memory=self._truncate_memory(memory))
-        except Exception:
-            return f"\n【关于对方，你记得的事】\n{self._truncate_memory(memory)}\n"
+    async def _living_memory_block(self, umo: str = "") -> str:
+        parts = []
+        # 长期记忆（mem0）召回：用最近用户发言做查询；未启用或未就绪时静默为空
+        if umo:
+            engine = getattr(self.owner, "living_memory", None)
+            if engine is not None:
+                try:
+                    query = engine.recent_text(umo) or "对方最近的状态与近况"
+                    block = await engine.recall_block(query, umo)
+                    if block:
+                        parts.append(block.strip())
+                except Exception as e:
+                    logger.warning(f"[living] 长期记忆召回失败: {e}")
+        # KV 记忆摘要（原有实现，保留作降级）
+        if self._cfg_bool("memory_enabled", True):
+            try:
+                memory = await self._collect_memory()
+            except Exception as e:
+                logger.warning(f"[living] 取记忆失败: {e}")
+                memory = ""
+            if memory:
+                try:
+                    parts.append(
+                        MEMORY_BLOCK_TEMPLATE.format(
+                            memory=self._truncate_memory(memory)
+                        ).strip()
+                    )
+                except Exception:
+                    parts.append(
+                        "【关于对方，你记得的事】" + chr(10) + self._truncate_memory(memory)
+                    )
+        return (chr(10) + chr(10)).join(p for p in parts if p)
 
     async def _living_compose(
         self, umo: str, s: dict, intent: str, reason: str, now_dt: datetime
     ) -> str:
         persona_block = await self._living_persona_block()
         world_block = await self._living_world_block()
-        memory_block = await self._living_memory_block()
+        memory_block = await self._living_memory_block(umo)
         last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
         gap_min = max(1.0, (now_dt.timestamp() - last) / 60.0)
         label = {
@@ -5310,6 +5328,412 @@ class ProactiveGuardCore(_PluginCoreBase):
                     bits.append(f"{h.get('time', '?')} {h.get('kind', '?')}: {str(h.get('detail') or '')[:28]}")
                 lines.append("  最近：" + " / ".join(bits))
         yield event.plain_result(chr(10).join(lines))
+
+# ===========================================================================
+# 核心七：长期记忆（mem0 后端，插件内单例，失败降级）
+# 设计约束见 docs/PHASE2_MEM0_PROBE.md：
+#   - import mem0 13.7s / 建实例 1.6~10.4s / add(infer=True) 13.3s → 全程 to_thread + 只建一次
+#   - qdrant 嵌入式是目录独占锁 → 进程内单例，close 时 client.close()
+#   - mem0 2.2.1 的 search/get_all 只接受 filters={"user_id": ...}
+#   - 任何异常都不打断聊天主链路（只 warning，返回空）
+# ===========================================================================
+MEM0_RECALL_TEMPLATE = """
+【你记得的事】（长期记忆里想起来的片段，未必都相关；不确定就当没想起）
+{memories}
+"""
+
+
+def _mem_detect_anthropic() -> dict:
+    """从 AstrBot 的 cmd_config.json 里找一个可用的 anthropic 兼容 provider。"""
+    data_dir = _plugin_data_dir()
+    if not data_dir:
+        return {}
+    path = os.path.join(data_dir, "cmd_config.json")
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+    except Exception:
+        return {}
+    providers = cfg.get("provider") or cfg.get("providers") or []
+    if not isinstance(providers, list):
+        return {}
+    for p in providers:
+        if not isinstance(p, dict):
+            continue
+        kind = str(p.get("type") or p.get("provider_type") or "").lower()
+        if "anthropic" not in kind:
+            continue
+        keys = p.get("key") or []
+        if isinstance(keys, str):
+            keys = [keys]
+        key = ""
+        for k in keys:
+            if isinstance(k, str) and k.strip():
+                key = k.strip()
+                break
+        if not key:
+            continue
+        base = str(p.get("api_base") or p.get("api_base_url") or "").strip().rstrip("/")
+        model = ""
+        mc = p.get("model_config") or {}
+        if isinstance(mc, dict):
+            model = str(mc.get("model") or "").strip()
+        return {"api_key": key, "base_url": base, "model": model}
+    return {}
+
+
+class LivingMemoryCore(_PluginCoreBase):
+    """长期记忆层：mem0 的薄封装（懒加载单例 + 异步化 + 失败降级）。"""
+
+    def __init__(self, owner) -> None:
+        super().__init__(owner)
+        self._mem = None
+        self._build_lock = asyncio.Lock()
+        self._init_failed = False
+        self._seeded = False
+        self._recent: dict = {}
+        self._tasks: set = set()
+
+    # ---------------------------- 配置 ---------------------------- #
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        v = self.config.get(key, default)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _cfg_str(self, key: str, default: str = "") -> str:
+        try:
+            val = self.config.get(key)
+        except Exception:
+            return default
+        if val is None:
+            return default
+        return str(val).strip() or default
+
+    def _on(self) -> bool:
+        return self._cfg_bool("mem0_enabled", False)
+
+    def _sid(self, umo: str) -> str:
+        out = []
+        for ch in str(umo or ""):
+            out.append(ch if (ch.isalnum() or ch in "_-") else "_")
+        return "".join(out)[:80] or "default"
+
+    def _uid(self, umo: str) -> str:
+        return "u_" + self._sid(umo)
+
+    def _data_dir(self) -> str:
+        data = _plugin_data_dir()
+        if data:
+            return data
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _config_dict(self) -> dict:
+        data = self._data_dir()
+        model = self._cfg_str("mem0_llm_model", "mimo-v2.6-pro")
+        base = self._cfg_str("mem0_llm_base_url", "https://token-plan-cn.xiaomimimo.com/anthropic")
+        key = self._cfg_str("mem0_llm_api_key", "")
+        if not key:
+            found = _mem_detect_anthropic()
+            key = found.get("api_key", "")
+            if not base:
+                base = found.get("base_url", "")
+        embed = self._cfg_str("mem0_embed_model", "BAAI/bge-small-zh-v1.5")
+        return {
+            "llm": {
+                "provider": "anthropic",
+                "config": {
+                    "model": model,
+                    "api_key": key,
+                    "anthropic_base_url": base,
+                    "temperature": 0.1,
+                    "max_tokens": 2000,
+                },
+            },
+            "embedder": {
+                "provider": "fastembed",
+                "config": {"model": embed, "embedding_dims": 512},
+            },
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "collection_name": "elaina_memories",
+                    "path": os.path.join(data, "mem0_qdrant"),
+                    "embedding_model_dims": 512,
+                    "on_disk": True,
+                },
+            },
+            "history_db_path": os.path.join(data, "mem0_history.db"),
+        }
+
+    # ------------------------- 懒加载与初始化 ------------------------- #
+    def _prepare_env(self) -> None:
+        data = self._data_dir()
+        os.environ.setdefault("MEM0_TELEMETRY", "False")
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        cache = os.path.join(data, "fastembed_cache")
+        try:
+            os.makedirs(cache, exist_ok=True)
+        except Exception:
+            pass
+        os.environ.setdefault("FASTEMBED_CACHE_PATH", cache)
+
+    def _build(self):
+        self._prepare_env()
+        from mem0 import Memory  # 延迟导入：没装依赖时插件照常启动
+
+        logger.info("[memory] 正在初始化 mem0（首次 10~20s，含模型加载）…")
+        t0 = time.time()
+        mem = Memory.from_config(self._config_dict())
+        logger.info(f"[memory] mem0 就绪（{time.time() - t0:.1f}s）")
+        return mem
+
+    async def _ensure(self):
+        if self._mem is not None:
+            return self._mem
+        if self._init_failed:
+            return None
+        async with self._build_lock:
+            if self._mem is not None:
+                return self._mem
+            if self._init_failed:
+                return None
+            try:
+                self._mem = await asyncio.to_thread(self._build)
+            except Exception as e:
+                self._init_failed = True
+                logger.warning(f"[memory] mem0 初始化失败，本次运行长期记忆不可用: {e}")
+                return None
+        return self._mem
+
+    def _spawn(self, coro) -> None:
+        try:
+            task = asyncio.create_task(coro)
+        except Exception as e:
+            logger.warning(f"[memory] 后台任务创建失败: {e}")
+            return
+
+        def _done(t):
+            self._tasks.discard(t)
+            try:
+                err = t.exception()
+            except Exception:
+                err = None
+            if err is not None:
+                logger.warning(f"[memory] 后台任务异常: {err}")
+
+        self._tasks.add(task)
+        task.add_done_callback(_done)
+
+    async def initialize(self) -> None:
+        """插件启动：后台预热（不阻塞 AstrBot 启动）+ 种子记忆。"""
+        if not self._on():
+            return
+        self._spawn(self._warmup())
+
+    async def _warmup(self) -> None:
+        mem = await self._ensure()
+        if mem is None:
+            return
+        try:
+            await self.seed_worldview()
+        except Exception as e:
+            logger.warning(f"[memory] 种子记忆写入失败: {e}")
+
+    # ---------------------------- 召回 ---------------------------- #
+    async def search(self, query: str, umo: str, top_k: int = 0) -> list:
+        if not self._on() or not str(query or "").strip():
+            return []
+        mem = await self._ensure()
+        if mem is None:
+            return []
+        k = int(top_k or self._cfg_int("mem0_top_k", 6))
+        thr = max(1, min(100, self._cfg_int("mem0_threshold_pct", 45))) / 100.0
+        uid = self._uid(umo)
+        try:
+            res = await asyncio.to_thread(
+                mem.search,
+                str(query).strip()[:400],
+                filters={"user_id": uid},
+                top_k=k,
+                threshold=thr,
+            )
+        except Exception as e:
+            logger.warning(f"[memory] 召回失败: {e}")
+            return []
+        items = res.get("results") if isinstance(res, dict) else res
+        out = []
+        for it in items or []:
+            if isinstance(it, dict) and str(it.get("memory") or "").strip():
+                out.append(it)
+        return out
+
+    async def recall_block(self, query: str, umo: str, chars: int = 0) -> str:
+        """把召回结果拼成提示词块；没有命中或不可用时返回空串。"""
+        if not self._on():
+            return ""
+        try:
+            hits = await self.search(query, umo)
+        except Exception as e:
+            logger.warning(f"[memory] 召回块构建失败: {e}")
+            return ""
+        if not hits:
+            return ""
+        lines = []
+        for it in hits[:8]:
+            text = " ".join(str(it.get("memory") or "").split())
+            if text:
+                lines.append("- " + text)
+        if not lines:
+            return ""
+        limit = int(chars or self._cfg_int("mem0_recall_chars", 1200))
+        body = chr(10).join(lines)[:limit]
+        return MEM0_RECALL_TEMPLATE.replace("{memories}", body)
+
+    # ---------------------------- 写入 ---------------------------- #
+    async def seed_worldview(self) -> int:
+        """把 worldview.json 的事实条目写进长期记忆（幂等：已在的不重复写）。"""
+        if not self._on() or not self._cfg_bool("mem0_seed_facts", True):
+            return 0
+        if self._seeded:
+            return 0
+        w = load_worldview_asset() or {}
+        facts = [
+            f for f in (w.get("facts") or [])
+            if isinstance(f, dict) and str(f.get("fact") or "").strip()
+        ]
+        if not facts:
+            self._seeded = True
+            return 0
+        mem = await self._ensure()
+        if mem is None:
+            return 0
+        uid = "elaina_world"
+        have = set()
+        try:
+            existing = await asyncio.to_thread(mem.get_all, filters={"user_id": uid})
+            items = existing.get("results") if isinstance(existing, dict) else existing
+            for it in items or []:
+                if isinstance(it, dict):
+                    have.add(" ".join(str(it.get("memory") or "").split()))
+        except Exception as e:
+            logger.warning(f"[memory] 读取世界观点记忆失败（按空处理）: {e}")
+        added = 0
+        for f in facts[:80]:
+            text = " ".join(str(f.get("fact")).split())
+            if not text or text in have:
+                continue
+            meta = {"kind": "worldview", "fact_id": f.get("id"), "importance": f.get("importance")}
+            try:
+                await asyncio.to_thread(
+                    mem.add, text, user_id=uid, infer=False, metadata=meta
+                )
+                added += 1
+            except Exception as e:
+                logger.warning(f"[memory] 种子写入失败（跳过）: {e}")
+                break
+        self._seeded = True
+        logger.info(f"[memory] 世界观点种子记忆：新增 {added} 条（共 {len(facts)} 条事实）")
+        return added
+
+    async def on_user_message(self, event) -> None:
+        """用户消息进缓冲；等助手回复配成一轮后批量写入。"""
+        if not self._on():
+            return
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            text = str(getattr(event, "message_str", "") or "").strip()
+        except Exception:
+            return
+        if not umo or not text:
+            return
+        buf = self._recent.setdefault(self._sid(umo), [])
+        buf.append({"role": "user", "content": text[:500]})
+        del buf[:-12]
+
+    async def on_llm_response(self, event, resp) -> None:
+        if not self._on():
+            return
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+        except Exception:
+            return
+        if not umo or not text:
+            return
+        sid = self._sid(umo)
+        buf = self._recent.setdefault(sid, [])
+        buf.append({"role": "assistant", "content": text[:500]})
+        del buf[:-16]
+        turns = sum(1 for m in buf if m.get("role") == "user")
+        if turns < max(1, self._cfg_int("mem0_flush_turns", 4)):
+            return
+        batch = list(buf)
+        buf.clear()
+        self._spawn(self._write(umo, batch))
+
+    async def _write(self, umo: str, msgs: list) -> None:
+        mem = await self._ensure()
+        if mem is None:
+            return
+        infer = self._cfg_bool("mem0_infer", False)
+        meta = {"kind": "chat", "session": self._sid(umo)}
+        try:
+            t0 = time.time()
+            await asyncio.to_thread(
+                mem.add, msgs, user_id=self._uid(umo), infer=infer, metadata=meta
+            )
+            logger.info(f"[memory] 已写入记忆 {len(msgs)} 条（{time.time() - t0:.1f}s, infer={infer}）")
+        except Exception as e:
+            logger.warning(f"[memory] 写入记忆失败: {e}")
+
+    # ---------------------------- 观测与收尾 ---------------------------- #
+    def recent_text(self, umo: str, limit: int = 3) -> str:
+        """最近几条用户发言，用作召回查询。"""
+        buf = self._recent.get(self._sid(umo)) or []
+        texts = [m.get("content", "") for m in buf if m.get("role") == "user"]
+        return "；".join(texts[-limit:])[:300]
+
+    def status(self) -> dict:
+        return {
+            "enabled": self._on(),
+            "loaded": self._mem is not None,
+            "init_failed": self._init_failed,
+            "seeded": self._seeded,
+            "buffers": {k: len(v) for k, v in self._recent.items()},
+            "tasks": len(self._tasks),
+        }
+
+    async def close(self) -> None:
+        for t in list(self._tasks):
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        self._tasks.clear()
+        self._recent.clear()
+        mem, self._mem = self._mem, None
+        if mem is None:
+            return
+
+        def _shutdown():
+            try:
+                mem.vector_store.client.close()
+            except Exception:
+                pass
+
+        try:
+            await asyncio.to_thread(_shutdown)
+        except Exception:
+            pass
+        logger.info("[memory] 长期记忆已关闭")
+
 
 # ===========================================================================
 # 核心四：Elaina 表情包（本地表情库 + AI 选图，对齐原版 astrbot_plugin_Elaina_meme_Bridge）
@@ -6424,6 +6848,7 @@ class ElainaSuitePlugin(Star):
         self._bypass_cnt = 0
         self.image_bridge = ImageBridgeCore(self)
         self.daily_digest = DailyDigestCore(self)
+        self.living_memory = LivingMemoryCore(self)
         self.proactive_guard = ProactiveGuardCore(self)
         self.meme = ElainaMemeCore(self)
         self.llm_guard = LlmGuardCore(self)
@@ -6453,6 +6878,7 @@ class ElainaSuitePlugin(Star):
         """插件激活时：注册定时任务 + 安装门禁 + 预加载本地表情库。"""
         await self.daily_digest.initialize()
         await self.proactive_guard.initialize()
+        await self.living_memory.initialize()
         await self.system_health.initialize()
         await self.meme.initialize()
 
@@ -6462,6 +6888,7 @@ class ElainaSuitePlugin(Star):
         await self.meme.terminate()
         await self.daily_digest.terminate()
         await self.proactive_guard.terminate()
+        await self.living_memory.close()
         await self.system_health.terminate()
 
     # ------------------------------------------------------------------ #
@@ -6476,6 +6903,7 @@ class ElainaSuitePlugin(Star):
     async def guard_on_user_message(self, event: AstrMessageEvent):
         """门禁：记录会话最近活跃时间（不产生任何回复）。"""
         await self.proactive_guard._on_user_message(event)
+        await self.living_memory.on_user_message(event)
 
     # ------------------------------------------------------------------ #
     # LLM 钩子路由
@@ -6489,6 +6917,11 @@ class ElainaSuitePlugin(Star):
     async def llm_guard_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 拦截兜底：挂兜底错误文案 + 记录请求快照。"""
         await self.llm_guard.on_llm_request(event, req)
+
+    @filter.on_llm_response(priority=99998)
+    async def memory_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """长期记忆：把「用户 + 助手」配成一轮，够数后后台写入 mem0。"""
+        await self.living_memory.on_llm_response(event, resp)
 
     @filter.on_llm_response(priority=99999)
     async def meme_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -6544,6 +6977,21 @@ class ElainaSuitePlugin(Star):
         """查看主动消息 v2 的调度状态（会话、下次决策、待触发、今日已发）。"""
         async for result in self.proactive_guard.living_status_command(event):
             yield result
+
+    @filter.command("记忆状态", alias={"长期记忆状态"})
+    async def memory_status_cmd(self, event: AstrMessageEvent):
+        """查看长期记忆（mem0）状态：是否启用、是否就绪、缓冲与种子情况。"""
+        st = self.living_memory.status()
+        lines = [
+            "长期记忆（mem0）状态：",
+            f"  启用：{'是' if st.get('enabled') else '否'}",
+            f"  已就绪：{'是' if st.get('loaded') else '否'}"
+            + ("（初始化失败，本次运行降级）" if st.get("init_failed") else ""),
+            f"  世界观种子：{'已写' if st.get('seeded') else '未写'}",
+            f"  待写入缓冲：{st.get('buffers') or '无'}",
+            f"  后台任务：{st.get('tasks')} 个",
+        ]
+        yield event.plain_result(chr(10).join(lines))
 
     @filter.command("记忆")
     async def memory_command(self, event: AstrMessageEvent):

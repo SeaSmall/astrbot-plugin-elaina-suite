@@ -33,6 +33,7 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 > 旧版行为（每日预生成 5-10 条）：`living_enabled=false` 时保持原样，可随时回滚对照。
 消息内容由**人格 + 世界观**驱动：在 `world_setting` 里写好角色所处的世界与处境（例如「旅行中的魔女，正坐火车去下一个国家」），AI 会以第一人称分享她这一刻的经历与见闻，而不是天天问你吃饭睡觉；按 `self_share_ratio`（默认 70%）分配「分享自己」与「关心你」的比例，关心类至少保留 1 条——两者都要，不是把关心删掉。
 生成时会**先读记忆库**：每天 03:00 让 AI 把近期真实对话总结成一份「关于你这个人」的档案（发生过的事、爱好与偏好、正在做的事与进度、人际关系、情绪状态、明确约定）存进记忆库，写消息时注入提示词，AI 因此记得你是谁、在忙什么、聊过什么，而不是每天凭空寒暄；发出的消息再写回会话历史，形成闭环，避免今天重复昨天的话。记忆**只记用户**、不记 AI 自己（语气、称呼、性格、做过什么由人格设定负责）；多个会话的摘要会再合并成一份去重档案，注入前还会兜底剃掉「助手自称…」这类行并按正文去重——`/记忆` 里看到的第一段就是真正注入给 AI 的内容。成文由「规划 → 并行写手 → 审校」三个子代理协作完成（每个时间点一个独立写手，上下文更小、不易串味），规划或子代理失败时自动回退单次调用。
+> 🆕 **长期记忆（阶段二 · mem0，`mem0_enabled`，默认关闭）**：接入 mem0（嵌入式 qdrant + fastembed 中文向量，全部落 `<data>/` 持久卷）。三件事：**写入**（用户+助手配成一轮，攒够 `mem0_flush_turns` 轮后后台写入新记忆）、**召回**（主动消息生成前用最近几条发言做查询，命中结果作为【你记得的事】注入提示词）、**种子**（`worldview.json` 的 34 条世界观事实在首次启动时写入记忆）。实现上全程懒加载单例 + `asyncio.to_thread`（`import mem0` 冷启 13.7s、建实例 1.6~10.4s、qdrant 目录独占锁），任何失败只降级不打断聊天；默认 `infer=False` 直接存原文（开启 LLM 抽取会有 13 秒级延迟）。详见 [`docs/PHASE2_REPORT.md`](docs/PHASE2_REPORT.md)。
 
 **4. Elaina 表情包**：完全对齐原版 `astrbot_plugin_Elaina_meme_Bridge` —— AI 每次回复后按
 `meme_probability` 掷骰子，命中就把 **AI 自己的回复文本 + 表情包文件名列表** 交给 AI，让它挑一张最合适的本地表情包发送；AI 给出的名字不在库里时随机兜底一张。
@@ -56,8 +57,8 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## 🧩 兼容性设计（为什么能全部一起用）
 
-- **单一 Star 类 + 6 个功能核心**：AstrBot 一个插件目录只注册一个 Star 类，因此本插件用
-  `ElainaSuitePlugin` 持有 6 个核心（ImageBridge / DailyDigest / ProactiveGuard / ElainaMeme / LlmGuard / SystemHealth），
+- **单一 Star 类 + 7 个功能核心**：AstrBot 一个插件目录只注册一个 Star 类，因此本插件用
+  `ElainaSuitePlugin` 持有 7 个核心（ImageBridge / DailyDigest / ProactiveGuard / LivingMemory / ElainaMeme / LlmGuard / SystemHealth），
   由它统一路由事件、指令与 LLM 钩子，核心间无重复注册。
 - **配置键按模块加前缀**，彻底避免撞键：
 
@@ -73,19 +74,20 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
   `_bypass_cnt` 加一，门禁直接放行；其它插件 / AstrBot 内置主动 Agent 仍被拦截。
   （单插件版曾出现的「日报被门禁拦掉」问题，在合并版里从结构上不存在。）
 - **钩子清单**：`event_message_type(ALL)` × 2（图片桥接 / 门禁活跃记录）、
-  `on_llm_request` × 2（图片注入 / 拦截兜底快照）、`on_llm_response` × 1（表情包，`priority=99999`）、
+  `on_llm_request` × 2（图片注入 / 拦截兜底快照）、`on_llm_response` × 2（长期记忆写入 `priority=99998` / 表情包 `priority=99999`）、
   `on_decorating_result` × 1（拦截兜底）——互不抢占，全部生效。
 - **指令清单**：`/digest`(`/日报`)、`/订阅日报`、`/退订日报`、`/今日计划`、`/重建今日计划`、
-  `/记忆`、`/刷新记忆`、`/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
+  `/记忆`、`/刷新记忆`、`/主动状态`(`/主动消息状态`)、`/记忆状态`(`/长期记忆状态`)、`/picreset`、`/health`(`/健康报告`)、`/llmguard`(`/拦截状态`)、`/llmguarddump`(`/转存请求`)——无重名。
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 121 项，按前缀分组：
+配置面板里共 132 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `ai_enabled` / `security_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `ai_recent_days` / `security_recent_days` / `security_kev_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_ai` / `feeds_security` / `feeds_medical` / `feeds_policy` / `llm_prompt`
 - **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `world_setting` / `self_share_ratio` / `message_prompt` / `subagent_enabled` / `subagent_parallel` / `subagent_concurrency` / `subagent_review` / `memory_enabled` / `memory_cron` / `memory_turns` / `memory_window_hours` / `memory_refresh_cooldown` / `memory_rewrite_stale` / `memory_notes_enabled` / `memory_notes_chars` / `memory_refresh_before_gen` / `dispatch_fact_check` / `dispatch_regenerate_on_memory_change` / `memory_max_chars` / `memory_raw_fallback` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
 - **主动消息 v2（阶段一）**：`living_enabled` / `living_min_silence_minutes` / `living_cooldown_minutes` / `living_daily_max` / `living_quiet_hours` / `living_offset_min` / `living_offset_max` / `living_ramp_minutes` / `living_decision_check_minutes` / `living_persona_chars` / `living_worldview_chars`
+- **长期记忆（阶段二 · mem0）**：`mem0_enabled` / `mem0_llm_model` / `mem0_llm_base_url` / `mem0_llm_api_key` / `mem0_embed_model` / `mem0_top_k` / `mem0_threshold_pct` / `mem0_seed_facts` / `mem0_flush_turns` / `mem0_recall_chars` / `mem0_infer`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
@@ -97,6 +99,11 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - 一个都不发：确认 `meme_enabled` 打开、`meme_probability` > 0（默认 0.5）；
 - 发的是「随机一张」而不是 AI 选的那张：说明 AI 回的文件名没对上（日志里会有 `AI 选择 \`xxx\` 不在库中，改用随机一张`），换个更强的对话模型通常就好；
 - QQ 官方平台媒体上传偶发失败时，插件会校验图片魔数/大小并带 `send_timeout` 超时，不会卡死（详见更新日志）。
+**Q：长期记忆（`mem0_enabled`）值得开吗？会不会拖慢回复？**
+- 第一次开启或重启后首次触发生成时会有 10~20 秒的模型加载（日志 `[memory] mem0 就绪（Xs）`），这段时间聊天不受影响（后台线程）；
+- 召回本身约 200ms（缓存命中更快）；写入是攒够轮数后后台批量跑，不阻塞对话；
+- 事实抽取（`mem0_infer=true`）单次约 13 秒且有英文输出风险，默认关闭；想让它自动归纳偏好再开；
+- 用 `/记忆状态` 可以看到是否已就绪、世界观种子是否写入。若日志出现「mem0 初始化失败」，本次运行会自动降级为无长期记忆模式，聊天照常。
 **Q：日报里出现 `high risk` 之类的报错文案？**
 - 那是服务商内容安全拦截，本插件的第 5 个功能（LLM 拦截兜底）会自动挡掉；日报侧还有「精简重试 + 模板兜底」双保险。
 **Q：政策前沿为什么不是「昨日」的？**

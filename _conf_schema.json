@@ -498,6 +498,69 @@
     "default": 1200,
     "description": "【主动消息 v2】注入提示词的世界观片段字数上限（来自插件内置 assets/worldview.json）"
   },
+  "mem0_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "长期记忆（阶段二）。开启后主动消息生成前从 mem0 召回相关记忆注入提示词，并在对话中后台写入新记忆。关闭时与旧版本行为一致。"
+  },
+  "mem0_llm_model": {
+    "type": "string",
+    "default": "mimo-v2.6-pro",
+    "description": "mem0 事实抽取用的 LLM 模型名（走 anthropic 兼容端点），默认即可用。"
+  },
+  "mem0_llm_base_url": {
+    "type": "string",
+    "default": "https://token-plan-cn.xiaomimimo.com/anthropic",
+    "description": "mem0 事实抽取用的 anthropic 兼容 base_url。"
+  },
+  "mem0_llm_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "mem0 抽取用的 API Key。留空则自动从 AstrBot 配置里 type=anthropic 的 provider 读取，一般无需填写。"
+  },
+  "mem0_embed_model": {
+    "type": "string",
+    "default": "BAAI/bge-small-zh-v1.5",
+    "description": "向量化模型（fastembed）。换模型必须同时清空 mem0_qdrant 目录，否则维度不匹配。"
+  },
+  "mem0_top_k": {
+    "type": "int",
+    "default": 6,
+    "min": 1,
+    "max": 20,
+    "description": "每次召回最多取几条记忆。"
+  },
+  "mem0_threshold_pct": {
+    "type": "int",
+    "default": 45,
+    "min": 5,
+    "max": 95,
+    "description": "召回相似度阈值（百分比）。越低越容易召回无关记忆，建议 40~55。"
+  },
+  "mem0_seed_facts": {
+    "type": "bool",
+    "default": true,
+    "description": "启动时把 worldview.json 的事实条目写入长期记忆（幂等，已存在的不会重复写）。"
+  },
+  "mem0_flush_turns": {
+    "type": "int",
+    "default": 4,
+    "min": 1,
+    "max": 20,
+    "description": "攒够几轮对话（用户+助手算一轮）后批量写入长期记忆。"
+  },
+  "mem0_recall_chars": {
+    "type": "int",
+    "default": 1200,
+    "min": 200,
+    "max": 4000,
+    "description": "召回块注入提示词的最大字符数。"
+  },
+  "mem0_infer": {
+    "type": "bool",
+    "default": false,
+    "description": "写入时是否让 LLM 抽取事实。开启会有 13 秒级延迟、抽取质量取决于模型，默认关闭（直接存原文）。"
+  },
   "meme_enabled": {
     "type": "bool",
     "default": true,
