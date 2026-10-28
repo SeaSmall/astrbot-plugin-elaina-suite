@@ -304,6 +304,50 @@ async def t10_chat_injection():
 
 
 
+async def t11_persona_block():
+    core = make_core()
+    block = core.persona_chat_block()
+    assert "【身份底稿" in block, block[:120]
+    assert "伊蕾娜" in block and "灰之魔女" in block
+    assert "自称" in block and "禁自称" in block
+    assert "性格：" in block and "说话：" in block
+    assert "习惯：" in block and "关系：" in block and "铁律：" in block
+    assert "不要复述它" in block, "必须告诉模型这不是要念出来的设定"
+    real = mod.load_persona_asset()
+    for t in (real.get("traits") or [])[:3]:
+        assert str(t.get("label")) in block, ("人格特质要进常驻块", t.get("label"))
+    off = make_core(persona_inject_enabled=False)
+    assert off.persona_chat_block() == ""
+    short = make_core(persona_inject_chars=600)
+    small = short.persona_chat_block()
+    assert 0 < len(small) <= 600, len(small)
+    assert small.startswith("【身份底稿"), "截断只能按行砍，不能砍掉标题"
+    print("[T11] 插件人格常驻块（身份/性格/说话/习惯/关系/铁律 + 可关闭 + 按行截断） OK")
+
+
+async def t12_persona_injected_first():
+    core = make_core()
+    plugin = type("P", (), {})()
+    plugin.proactive_guard = core
+    event = type("E", (), {"unified_msg_origin": UMO})()
+    req = type("R", (), {"system_prompt": "原有系统提示"})()
+    await mod.ElainaSuitePlugin.tsundere_on_llm_request(plugin, event, req)
+    text = req.system_prompt
+    assert "原有系统提示" in text, "不能把 AstrBot 原有提示词冲掉"
+    assert text.index("【身份底稿") < text.index("【傲娇怎么写"), "人格必须排在傲娇之前"
+    again = type("R", (), {"system_prompt": text})()
+    await mod.ElainaSuitePlugin.tsundere_on_llm_request(plugin, event, again)
+    assert again.system_prompt.count("【身份底稿") == 1, "幂等：不重复注入人格"
+    assert again.system_prompt.count("【傲娇怎么写") == 1, "幂等：不重复注入傲娇"
+    off = make_core(persona_inject_enabled=False, tsundere_chat_inject=False)
+    plugin2 = type("P", (), {})()
+    plugin2.proactive_guard = off
+    req2 = type("R", (), {"system_prompt": "x"})()
+    await mod.ElainaSuitePlugin.tsundere_on_llm_request(plugin2, event, req2)
+    assert req2.system_prompt == "x", "两个开关都关时不应改动提示词"
+    print("[T12] 对话注入：人格在前、傲娇在后、幂等、开关关闭不动原文 OK")
+
+
 async def main():
     await t1_static_bans()
     await t2_persona_paths_not_labels()
@@ -315,6 +359,8 @@ async def main():
     await t8_compose_retry()
     await t9_config_and_wiring()
     await t10_chat_injection()
+    await t11_persona_block()
+    await t12_persona_injected_first()
     print("阶段五（傲娇重构）测试全部通过")
 
 

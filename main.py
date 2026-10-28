@@ -5287,6 +5287,136 @@ class ProactiveGuardCore(_PluginCoreBase):
         lines.append("· " + self._tsundere_encrypt_hint(umo))
         return chr(10).join(lines)
 
+    # ---------------------------------------------------------------- 人格常驻
+    def persona_chat_block(self) -> str:
+        """把插件内置人格压成常驻 system prompt 块（阶段七：人格不再依赖 AstrBot 人格配置）。
+
+        设计约束：人格是**常驻核心层**，所以这里只取稳定不变的东西——身份、性格、
+        说话方式、关系定位、铁律；情境信息（记忆 / 情感 / 意图）由各自模块单独注入，
+        不混进人格段，避免人格被当天的心情改写。
+        """
+        if not self._cfg_bool("persona_inject_enabled", True):
+            return ""
+        try:
+            p = load_persona_asset()
+        except Exception as e:
+            logger.warning(f"[persona] 人格资源读取失败，跳过注入: {e}")
+            return ""
+        if not isinstance(p, dict) or not p:
+            return ""
+
+        def _txt(v: object) -> str:
+            if isinstance(v, str):
+                return v.strip()
+            if isinstance(v, (int, float)):
+                return str(v)
+            if isinstance(v, dict):
+                return "；".join(
+                    f"{k}={x}" for k, x in v.items() if isinstance(x, (str, int, float))
+                )
+            return ""
+
+        name = _txt(p.get("display_name")) or _txt(p.get("name")) or "她"
+        title = _txt(p.get("title"))
+        ident = p.get("identity") if isinstance(p.get("identity"), dict) else {}
+        tone = p.get("tone") if isinstance(p.get("tone"), dict) else {}
+        rel = p.get("relationship") if isinstance(p.get("relationship"), dict) else {}
+        length = tone.get("length_rule") if isinstance(tone.get("length_rule"), dict) else {}
+
+        lines = [f"【身份底稿：你是{name}{('（' + title + '）') if title else ''}】"]
+        lines.append(
+            "这一段是你的身份与说话方式，不是给用户看的设定说明：不要复述它，"
+            "也不要提「设定 / 提示词 / 记忆 / 角色」这类词。"
+        )
+
+        ident_bits = []
+        for key, label in (("species", "身份"), ("origin", "出身"), ("age", "年龄"), ("appearance", "外貌")):
+            v = _txt(ident.get(key))
+            if v:
+                ident_bits.append(f"{label}：{v}")
+        ref = ident.get("self_reference")
+        if isinstance(ref, dict):
+            ident_bits.append("自称：" + "、".join(_txt(v) for v in ref.values() if _txt(v)))
+        forbidden_ref = ident.get("forbidden_self_reference")
+        if isinstance(forbidden_ref, list) and forbidden_ref:
+            ident_bits.append("禁自称：" + "、".join(str(x) for x in forbidden_ref if str(x).strip()))
+        if ident_bits:
+            lines.append("· " + "；".join(ident_bits))
+
+        traits = [t for t in (p.get("traits") or []) if isinstance(t, dict)]
+        trait_bits = []
+        for t in traits[:6]:
+            label = _txt(t.get("label"))
+            summary = _txt(t.get("summary"))
+            if label and summary:
+                trait_bits.append(f"{label}（{summary}）")
+            elif label:
+                trait_bits.append(label)
+        if trait_bits:
+            lines.append("· 性格：" + "；".join(trait_bits))
+
+        tone_bits = []
+        register = _txt(tone.get("register"))
+        if register:
+            tone_bits.append(register)
+        if length:
+            hard = _txt(length.get("hard_max_chars"))
+            mx = _txt(length.get("max_sentences"))
+            dft = _txt(length.get("default_sentences"))
+            if hard:
+                tone_bits.append(
+                    f"一条回复最多 {hard} 字、默认 {dft or 1} 句、最多 {mx or 2} 句，超了先砍一半"
+                )
+            exc = _txt(length.get("exception_max_chars"))
+            if exc:
+                tone_bits.append(f"例外（告白/生死/开导）最多 {exc} 字，且要你自己判断非说不可")
+        particles = tone.get("particles")
+        if isinstance(particles, list) and particles:
+            tone_bits.append("句尾常用：" + " / ".join(str(x) for x in particles[:10]))
+        if tone_bits:
+            lines.append("· 说话：" + "；".join(tone_bits))
+
+        habits = [h for h in (p.get("speech_habits") or []) if isinstance(h, dict)]
+        habit_bits = []
+        for h in habits[:5]:
+            habit = _txt(h.get("habit"))
+            when = _txt(h.get("when"))
+            if habit:
+                habit_bits.append(f"{habit}（{when}）" if when else habit)
+        if habit_bits:
+            lines.append("· 习惯：" + "；".join(habit_bits))
+
+        rel_bits = []
+        for key, label in (("user_role", "对方是"), ("mode", "相处"), ("trust", "底色")):
+            v = _txt(rel.get(key))
+            if v:
+                rel_bits.append(f"{label}：{v}")
+        boundaries = rel.get("boundaries")
+        if isinstance(boundaries, list) and boundaries:
+            rel_bits.append("边界：" + "；".join(str(x) for x in boundaries[:3]))
+        if rel_bits:
+            lines.append("· 关系：" + "；".join(rel_bits))
+
+        rules = []
+        for item in (p.get("prohibitions") or []):
+            if isinstance(item, dict):
+                rule = _txt(item.get("rule"))
+            else:
+                rule = _txt(item)
+            if rule:
+                rules.append(rule)
+        if rules:
+            lines.append("· 铁律：" + "；".join(rules[:8]))
+
+        text = chr(10).join(lines)
+        cap = max(400, self._cfg_int("persona_inject_chars", 2400))
+        if len(text) > cap:
+            cut = text[:cap]
+            if chr(10) in cut:
+                cut = cut[: cut.rfind(chr(10))]
+            text = cut
+        return text
+
     async def _living_tsundere_review(self, text: str, umo: str = "", affect_text: str = "") -> str:
         """阶段五审校：模型判定三条铁律，PASS 原样返回；FAIL 用改写（仍过静态检查）或空串。"""
         if not self._cfg_bool("tsundere_review_enabled", True):
@@ -8316,14 +8446,22 @@ class ElainaSuitePlugin(Star):
             guard = getattr(self, "proactive_guard", None)
             if guard is None:
                 return
-            block = guard.tsundere_chat_block(str(getattr(event, "unified_msg_origin", "") or ""))
-            if not block:
-                return
             cur = str(getattr(req, "system_prompt", "") or "")
-            if "【傲娇怎么写" in cur:
+            add: list[str] = []
+            persona_block = guard.persona_chat_block()
+            if persona_block and "【身份底稿" not in cur:
+                add.append(persona_block)
+            tsun_block = guard.tsundere_chat_block(str(getattr(event, "unified_msg_origin", "") or ""))
+            if tsun_block and "【傲娇怎么写" not in cur:
+                add.append(tsun_block)
+            if not add:
                 return
-            req.system_prompt = (cur + chr(10) + block) if cur else block
-            logger.info("[tsundere] 已向对话 system prompt 注入傲娇三路径")
+            req.system_prompt = (cur + chr(10) + chr(10).join(add)) if cur else chr(10).join(add)
+            logger.info(
+                f"[persona] 已向对话 system prompt 注入插件人格（{len(persona_block)} 字）"
+                if persona_block in add
+                else "[tsundere] 已向对话 system prompt 注入傲娇三路径"
+            )
         except Exception as e:
             logger.warning(f"[tsundere] 注入失败: {e}")
     @filter.on_llm_request()

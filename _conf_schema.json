@@ -681,6 +681,21 @@
     "description": "落选候选意图的降权系数（只降权不删除）",
     "default": 0.85
   },
+  "persona_inject_enabled": {
+    "type": "bool",
+    "description": "把插件内置人格（assets/persona.json）注入正常对话的 system prompt 常驻（阶段七：人格固化在插件内，不依赖 AstrBot 人格配置）",
+    "default": true
+  },
+  "persona_inject_chars": {
+    "type": "int",
+    "description": "人格常驻块的字数上限（超出按行截断）",
+    "default": 2400,
+    "slider": {
+      "min": 600,
+      "max": 6000,
+      "step": 100
+    }
+  },
   "tsundere_enabled": {
     "type": "bool",
     "description": "启用傲娇三路径（阶段五 · 行动先行+借口收尾 / 毒舌包裹真实信息 / 关心以「泄露」出现）",

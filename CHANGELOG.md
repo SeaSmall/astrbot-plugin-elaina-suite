@@ -655,3 +655,29 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - 真机验证（1.7.0）：`sha256=8fc1bcd4…` 与本地一致、重启 0 Traceback、
   `[memory] 情感调制召回：负面强度=1.00 首位加成=0.180（情绪一致）`。
 - 配置面板 156 → 159 项。
+
+## v1.8.0（2026-10-28）
+
+### 问题
+- 「像不像伊蕾娜」完全依赖服务器上那份 persona 是否配置正确：人格文档在 AstrBot 的 personas 表里，
+  插件既不内置也不注入，换机器 / 换会话（例如语音通道）就可能变成一个「没有身份」的助手。
+- 语音通道（`webchat_phone`）与 QQ 主会话是两套人格上下文，回复语气需要靠插件自己保证稳定。
+
+### 改动
+- 新增 `ProactiveGuardCore.persona_chat_block()`（`main.py` 约 `5289`）：读插件自带的 `assets/persona.json`，
+  压成 `【身份底稿：你是伊蕾娜（灰之魔女）】` 六段（身份 / 性格 / 说话 / 习惯 / 关系 / 铁律），
+  按 `persona_inject_chars` 在行边界截断；开头写明「这一段是你的身份与说话方式，不要复述它，
+  也不要提设定/提示词/记忆/角色」。
+- 新增 `@filter.on_llm_request(priority=99996) tsundere_on_llm_request`：每次请求先注入人格底稿
+  （幂等判据 `【身份底稿`）再注入傲娇写法（判据 `【傲娇怎么写`），**追加**到 `req.system_prompt` 末尾、
+  不覆盖原有提示词，并打日志 `[persona] 已向对话 system prompt 注入插件人格（N 字）`。
+- 两个新配置键：`persona_inject_enabled`(默认 true) / `persona_inject_chars`(默认 2400，600~6000)。
+
+### 其它
+- `tests/test_tsundere.py` 新增 T11（人格块六段齐全、含前 3 条特质、关闭返回空、
+  `persona_inject_chars=600` 时截断到 ≤600 且仍以标题行开头）、T12（真实调用
+  `ElainaSuitePlugin.tsundere_on_llm_request`：原文保留、人格索引在傲娇之前、二次调用各标记只出现一次、
+  两个开关都关时 system prompt 原样）；`tests/test_tsundere.py` 仍 12 组全过。
+- 真机：容器内实测人格块 **1140 字**；从本地语音通道连发 4 句，日志 4 次
+  `[persona] 已向对话 system prompt 注入插件人格（1140 字）`，回复为傲娇短句（「被说就难受成这样？……过来，先吃饭」）。
+- 配置面板 159 → 161 项。
