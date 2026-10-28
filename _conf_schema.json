@@ -616,6 +616,46 @@
     "description": "PAD 基线覆盖（p,a,d）；留空则用 persona.json 里的 emotional_tendencies.baseline_pad",
     "default": ""
   },
+  "motivation_enabled": {
+    "type": "bool",
+    "description": "启用动机与注意力（阶段四 · GWA 式候选意图竞争 + 内在动机 + 学习进度门控）",
+    "default": false
+  },
+  "motivation_affect_gate": {
+    "type": "bool",
+    "description": "候选意图进入竞争前受当前情感门控（沮丧时分享降权、试探升权）",
+    "default": true
+  },
+  "motivation_learning_gate": {
+    "type": "bool",
+    "description": "按学习进度门控话题：反复发起却没回应的话题优先级下降",
+    "default": true
+  },
+  "motivation_topic_max": {
+    "type": "int",
+    "description": "每个会话保留的待接话题条数",
+    "default": 12
+  },
+  "motivation_topic_chars": {
+    "type": "int",
+    "description": "待接话题截断长度（字数）",
+    "default": 24
+  },
+  "motivation_engage_window_minutes": {
+    "type": "int",
+    "description": "主动消息发出后多久内的回话算作「有效回应」（分钟）",
+    "default": 180
+  },
+  "motivation_select_noise": {
+    "type": "float",
+    "description": "注意力竞争的打分噪声（0 = 纯取最高分）",
+    "default": 0.15
+  },
+  "motivation_loser_decay": {
+    "type": "float",
+    "description": "落选候选意图的降权系数（只降权不删除）",
+    "default": 0.85
+  },
   "meme_enabled": {
     "type": "bool",
     "default": true,

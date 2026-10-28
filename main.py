@@ -3030,7 +3030,9 @@ class ProactiveGuardCore(_PluginCoreBase):
                     self._last_user_activity = dict(items[len(items) // 2 :])
                 # 阶段一：把用户活跃喂给 living 决策循环（取消待触发 + 推后下次决策）
                 if self._living_on():
-                    await self._living_on_user_message(umo)
+                    await self._living_on_user_message(
+                        umo, getattr(event, "message_str", "") or ""
+                    )
         except Exception:
             pass
 
@@ -4923,13 +4925,28 @@ class ProactiveGuardCore(_PluginCoreBase):
                     "reason": f"已经 {self._living_human_gap(silence_h * 60)}没动静",
                 }
             )
+        mot = getattr(self.owner, "motivation", None)
+        if mot is not None and mot.enabled():
+            try:
+                out = mot.reweight(umo, out, now_dt)
+            except Exception as e:
+                logger.warning(f"[living] 动机重加权失败（用原分）: {e}")
         return out
 
-    def _living_plan_intent(self, umo: str, s: dict, now_dt: datetime) -> dict:
+    async def _living_plan_intent(self, umo: str, s: dict, now_dt: datetime) -> dict:
         cands = self._living_candidates(umo, s, now_dt)
         if not cands:
             return {}
-        best = max(cands, key=lambda c: float(c.get("score") or 0) * (0.8 + 0.4 * self._living_rng.random()))
+        mot = getattr(self.owner, "motivation", None)
+        best = {}
+        if mot is not None and mot.enabled():
+            best = mot.select(umo, cands, now_dt)
+            try:
+                await mot._save()
+            except Exception:
+                pass
+        if not best:
+            best = max(cands, key=lambda c: float(c.get("score") or 0) * (0.8 + 0.4 * self._living_rng.random()))
         off_min = max(1, self._cfg_int("living_offset_min", 5))
         off_max = max(off_min + 1, self._cfg_int("living_offset_max", 45))
         offset = self._living_rng.randint(off_min, off_max)
@@ -4943,6 +4960,8 @@ class ProactiveGuardCore(_PluginCoreBase):
             "intent": str(best.get("intent") or "share"),
             "label": str(best.get("label") or ""),
             "reason": str(best.get("reason") or ""),
+            "topic": str(best.get("topic") or ""),
+            "why": str(best.get("why") or ""),
             "offset_min": offset,
             "fire_at": fire_dt.timestamp(),
         }
@@ -4970,7 +4989,7 @@ class ProactiveGuardCore(_PluginCoreBase):
             await self._living_save(state)
             await self._living_schedule_decision(umo)
             return
-        plan = self._living_plan_intent(umo, s, now_dt)
+        plan = await self._living_plan_intent(umo, s, now_dt)
         if not plan:
             self._living_log(s, "skip", "没有候选意图")
             await self._living_save(state)
@@ -4983,6 +5002,8 @@ class ProactiveGuardCore(_PluginCoreBase):
             "intent": plan["intent"],
             "label": plan["label"],
             "reason": plan["reason"],
+            "topic": plan.get("topic") or "",
+            "why": plan.get("why") or "",
             "created": now,
         }
         cooldown = max(1, self._cfg_int("living_cooldown_minutes", 180))
@@ -5167,7 +5188,7 @@ class ProactiveGuardCore(_PluginCoreBase):
         return (chr(10) + chr(10)).join(p for p in parts if p)
 
     async def _living_compose(
-        self, umo: str, s: dict, intent: str, reason: str, now_dt: datetime
+        self, umo: str, s: dict, intent: str, reason: str, now_dt: datetime, topic: str = ""
     ) -> str:
         persona_block = await self._living_persona_block()
         world_block = await self._living_world_block()
@@ -5192,8 +5213,9 @@ class ProactiveGuardCore(_PluginCoreBase):
         prompt = prompt.replace("{period}", self._living_period(now_dt))
         prompt = prompt.replace("{silence}", self._living_human_gap(gap_min))
         prompt = prompt.replace("{intent_label}", label)
+        extra = f"；具体到：{topic}" if topic else ""
         prompt = prompt.replace(
-            "{reason_block}", f"（由头：{reason}）" if reason else ""
+            "{reason_block}", f"（由头：{reason}{extra}）" if (reason or topic) else ""
         )
         try:
             raw = await self._llm_chat(prompt)
@@ -5246,6 +5268,7 @@ class ProactiveGuardCore(_PluginCoreBase):
             str(pending.get("intent") or "share"),
             str(pending.get("reason") or ""),
             now_dt,
+            str(pending.get("topic") or ""),
         )
         if not text:
             self._living_log(s, "skip", "生成失败或未过硬约束")
@@ -5261,6 +5284,16 @@ class ProactiveGuardCore(_PluginCoreBase):
         s["last_proactive_at"] = now_dt.timestamp()
         self._living_log(s, "sent", f"{pending.get('intent')}: {text[:60]}")
         await self._living_save(state)
+        mot = getattr(self.owner, "motivation", None)
+        if mot is not None and mot.enabled():
+            try:
+                await mot.note_attempt(
+                    umo,
+                    str(pending.get("intent") or ""),
+                    str(pending.get("topic") or ""),
+                )
+            except Exception as e:
+                logger.warning(f"[living] 记录主动尝试失败: {e}")
         logger.info(f"[living] 已发送主动消息（{umo}）：{text[:40]}")
         cooldown = max(1, self._cfg_int("living_cooldown_minutes", 180))
         await self._living_schedule_decision(umo, now_dt.timestamp() + cooldown * 60)
@@ -5273,7 +5306,7 @@ class ProactiveGuardCore(_PluginCoreBase):
                 logger.error(f"[living] 触发失败 {umo}: {e}", exc_info=True)
 
     # ------------------------- 用户消息介入 ------------------------- #
-    async def _living_on_user_message(self, umo: str) -> None:
+    async def _living_on_user_message(self, umo: str, text: str = "") -> None:
         """用户回话：更新活跃基线、取消待触发、把下一次决策推到沉默下限之后。"""
         if not self._living_on() or not umo:
             return
@@ -5288,6 +5321,9 @@ class ProactiveGuardCore(_PluginCoreBase):
             nxt = now + max(60, self._cfg_int("living_min_silence_minutes", 90) * 60)
             s["next_decision_at"] = nxt
             await self._living_save(state)
+            mot = getattr(self.owner, "motivation", None)
+            if mot is not None and mot.enabled():
+                await mot.observe_user(umo, text)
             self._living_add_date_job(
                 self._living_decision_tick,
                 nxt,
@@ -6398,6 +6434,488 @@ class AffectCore(_PluginCoreBase):
         logger.info("[affect] 情感状态已停止")
 
 # ===========================================================================
+# 核心九：动机与注意力（阶段四 · GWA 式注意力选择 + 内在动机候选 + 学习进度门控）
+#
+# 论文/机制对应（详见 docs/PHASE4_REPORT.md）：
+#   · GWA（Mashour et al. 2020, Neuron；Shanahan 2006）：排他性瓶颈，每次决策只有一个候选
+#     意图进入生成焦点（winner-take-all），其余候选降权但不删除，留待下次竞争。
+#   · 内在动机（Oudeyer & Kaplan 2007, Eq.11 learning progress）：某话题反复发起却没得到
+#     回应 → 学习进度低 → 优先级下降；得到回应 → 学习进度高 → 优先级回升。防「只追新不沉淀」。
+#   · 情感门控：候选进入选择前乘上 AffectCore 的情感系数（沮丧时「兴奋分享」降权、
+#     「试探性确认」升权），对应 Shanahan 2006 中 affect 介导 action selection 的结论。
+MOTIVATION_INTENTS = ("share", "care", "followup", "curiosity", "check_in")
+
+MOTIVATION_AFFECT_HINT = (
+    "【这一刻的注意力】你心里同时冒出几个念头，最后只有一个占了上风：{intent}。"
+    "{why}这不是任务清单，是你此刻真的更想说这件事。"
+)
+
+
+def _mot_bigrams(text: str) -> set:
+    """中文短文本相似度用 2-gram 集合（不依赖分词库）。"""
+    s = "".join(ch for ch in str(text or "") if ch.isalnum())
+    if len(s) < 2:
+        return {s} if s else set()
+    return {s[i : i + 2] for i in range(len(s) - 1)}
+
+
+def _mot_overlap(a: str, b: str) -> float:
+    """两个话题文本的 2-gram Jaccard 相似度（0~1）。"""
+    sa, sb = _mot_bigrams(a), _mot_bigrams(b)
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    return inter / float(len(sa | sb))
+
+
+def _mot_same_topic(a: str, b: str) -> bool:
+    """判断两条话题文本是不是同一件事（中文短句不能只靠 Jaccard，短句会被稀释）。"""
+    ta, tb = str(a or "").strip(), str(b or "").strip()
+    if not ta or not tb:
+        return False
+    if ta == tb or ta in tb or tb in ta:
+        return True
+    sa, sb = _mot_bigrams(ta), _mot_bigrams(tb)
+    inter = len(sa & sb)
+    if inter < 2:
+        return False
+    return inter / float(max(1, min(len(sa), len(sb)))) >= 0.35
+
+class MotivationCore(_PluginCoreBase):
+    """候选意图的生成、评分、竞争与学习进度维护（阶段四）。
+
+    状态落 <data>/motivation_state.json；内存态在 _state 里，写盘失败只 warning。
+    所有方法对关闭状态（motivation_enabled=false）都是空操作，保证可退回 v1.4.0 行为。
+    """
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self._state = None
+        self._dirty = False
+        self._lock = None
+
+    # ---------------------------- 基础设施 ---------------------------- #
+    def _cfg(self, key, default=None):
+        try:
+            return self.owner.config.get(key, default)
+        except Exception:
+            return default
+
+    def _cbool(self, key, default=False):
+        v = self._cfg(key, default)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on", "是")
+
+    def _cint(self, key, default=0):
+        try:
+            return int(float(self._cfg(key, default)))
+        except Exception:
+            return default
+
+    def _cfloat(self, key, default=0.0):
+        try:
+            return float(self._cfg(key, default))
+        except Exception:
+            return default
+
+    def _cstr(self, key, default=""):
+        v = self._cfg(key, default)
+        return default if v is None else str(v)
+
+    def enabled(self) -> bool:
+        return self._cbool("motivation_enabled", False)
+
+    def _state_file(self) -> str:
+        return os.path.join(_plugin_data_dir(), "motivation_state.json")
+
+    def _sid(self, umo: str) -> str:
+        return re.sub(r"[^0-9A-Za-z_]+", "_", str(umo or ""))[:80]
+
+    def _get_lock(self):
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _load(self) -> dict:
+        if self._state is not None:
+            return self._state
+        st = {"sessions": {}}
+        try:
+            with open(self._state_file(), encoding="utf-8") as f:
+                got = json.load(f)
+            if isinstance(got, dict) and isinstance(got.get("sessions"), dict):
+                st = got
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"[motivation] 读取状态失败（按空处理）: {e}")
+        self._state = st
+        return st
+
+    async def _save(self) -> None:
+        if not self._dirty:
+            return
+        st = self._load()
+        path = self._state_file()
+        try:
+            raw = json.dumps(st, ensure_ascii=False, indent=2)
+            tmp = path + ".part"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(raw)
+            os.replace(tmp, path)
+            self._dirty = False
+        except Exception as e:
+            logger.warning(f"[motivation] 状态保存失败: {e}")
+
+    def _sstate(self, umo: str) -> dict:
+        st = self._load()
+        sid = self._sid(umo)
+        s = st["sessions"].get(sid)
+        if not isinstance(s, dict):
+            s = {}
+            st["sessions"][sid] = s
+        s.setdefault("topics", {})
+        s.setdefault("pending", [])
+        s.setdefault("history", [])
+        s.setdefault("last_intent", "")
+        s.setdefault("last_topic", "")
+        return s
+
+    async def initialize(self) -> None:
+        self._load()
+        logger.info(
+            f"[motivation] 注意力/内在动机已初始化（启用={self.enabled()}，"
+            f"会话 {len(self._load().get('sessions') or {})} 个）"
+        )
+
+    async def close(self) -> None:
+        try:
+            await self._save()
+        except Exception:
+            pass
+
+    # ---------------------------- 观察与学习 ---------------------------- #
+    def _trim_topic(self, text: str) -> str:
+        limit = max(8, self._cint("motivation_topic_chars", 24))
+        t = re.sub(r"\s+", " ", str(text or "")).strip()
+        t = re.sub(r"^[，。！？、,.!?~～…\s]+", "", t)
+        return t[:limit]
+
+    def _topic_entries(self, umo: str) -> list:
+        s = self._sstate(umo)
+        out = [t for t in (s.get("topics") or {}).values() if isinstance(t, dict)]
+        return out
+
+    def learning_progress(self, entry: dict) -> float:
+        """learning progress 估计：engagement / (attempts + 1)，落在 0~1。"""
+        if not isinstance(entry, dict):
+            return 0.0
+        attempts = max(0.0, float(entry.get("attempts") or 0))
+        engaged = max(0.0, float(entry.get("engaged") or 0))
+        return max(0.0, min(1.0, engaged / (attempts + 1.0)))
+
+    def learning_gate(self, entry: dict) -> float:
+        """学习进度门控系数（Oudeyer & Kaplan 2007 的 learning progress 代理）。
+
+        新话题（还没发起过）按中性 1.0 计；反复发起却没回应的话题被压低（最低约 0.4）；
+        得到回应的抬到 1.4 上限。公式：1.0 + 1.2×progress − 0.7×ignored，最后 clamp 到 [0.2, 1.4]。
+        """
+        if not self._cbool("motivation_learning_gate", True):
+            return 1.0
+        if not isinstance(entry, dict):
+            return 1.0
+        attempts = max(0.0, float(entry.get("attempts") or 0))
+        progress = self.learning_progress(entry)
+        ignored = attempts / (attempts + 1.0)
+        gate = 1.0 + 1.2 * progress - 0.7 * ignored
+        return max(0.2, min(1.4, gate))
+
+    async def observe_user(self, umo: str, text: str = "") -> None:
+        """用户回话：记录新话题、给上一轮主动消息记学习进度、清掉已回应的话题。"""
+        if not self.enabled() or not umo:
+            return
+        async with self._get_lock():
+            try:
+                s = self._sstate(umo)
+                now = time.time()
+                topic_text = self._trim_topic(text)
+                if topic_text:
+                    bucket = s["topics"]
+                    hit_key = None
+                    for key, entry in list(bucket.items()):
+                        if not isinstance(entry, dict):
+                            continue
+                        if _mot_same_topic(key, topic_text):
+                            hit_key = key
+                            break
+                    if hit_key is None:
+                        bucket[topic_text] = {
+                            "topic": topic_text,
+                            "mentions": 1,
+                            "attempts": 0,
+                            "engaged": 0,
+                            "last_at": now,
+                        }
+                    else:
+                        bucket[hit_key]["mentions"] = int(bucket[hit_key].get("mentions") or 0) + 1
+                        bucket[hit_key]["last_at"] = now
+                    # 先把这句话已经回答掉的旧条目清掉，再把新话题挂上待接队列
+                    pending = [t for t in s["pending"] if isinstance(t, dict)]
+                    pending = [
+                        t for t in pending
+                        if not _mot_same_topic(t.get("text", ""), topic_text)
+                    ]
+                    pending.append({"text": topic_text, "at": now})
+                    cap = max(3, self._cint("motivation_topic_max", 12))
+                    s["pending"] = pending[-cap:]
+                    self._dirty = True
+                # 学习进度：上一条主动消息在观察窗口内被回应 → engaged+1
+                sent_at = float(s.get("last_proactive_at") or 0)
+                window = max(5.0, self._cfloat("motivation_engage_window_minutes", 180.0)) * 60.0
+                last_topic = str(s.get("last_topic") or "")
+                if sent_at and now - sent_at <= window and last_topic:
+                    entry = s["topics"].get(last_topic)
+                    if isinstance(entry, dict):
+                        boost = 2 if _mot_overlap(last_topic, topic_text) >= 0.3 else 1
+                        entry["engaged"] = int(entry.get("engaged") or 0) + boost
+                        self._dirty = True
+                        logger.info(
+                            f"[motivation] 学习进度更新：话题「{last_topic[:16]}」engaged+{boost}"
+                        )
+                    s["last_topic"] = ""
+
+                await self._save()
+            except Exception as e:
+                logger.warning(f"[motivation] observe_user 失败: {e}")
+
+    async def note_attempt(self, umo: str, intent: str, topic: str = "") -> None:
+        """一次主动消息发出后：记 attempts（学习进度的分母）与最近意图/话题。"""
+        if not self.enabled() or not umo:
+            return
+        async with self._get_lock():
+            try:
+                s = self._sstate(umo)
+                now = time.time()
+                s["last_intent"] = str(intent or "")
+                s["last_topic"] = str(topic or "")
+                s["last_proactive_at"] = now
+                if topic:
+                    entry = s["topics"].get(topic)
+                    if not isinstance(entry, dict):
+                        entry = {"topic": topic, "mentions": 0, "attempts": 0, "engaged": 0, "last_at": now}
+                        s["topics"][topic] = entry
+                    entry["attempts"] = int(entry.get("attempts") or 0) + 1
+                    entry["last_at"] = now
+                hist = s["history"]
+                hist.append({"at": now, "intent": intent, "topic": topic})
+                s["history"] = hist[-30:]
+                self._dirty = True
+                await self._save()
+            except Exception as e:
+                logger.warning(f"[motivation] note_attempt 失败: {e}")
+
+    # ---------------------------- 评分与竞争 ---------------------------- #
+    def _affect_ctx(self, umo: str) -> dict:
+        affect = getattr(self.owner, "affect", None)
+        ctx = {"p": 0.0, "a": 0.0, "d": 0.0, "silence_sev": 0.0, "enabled": False}
+        if affect is None:
+            return ctx
+        try:
+            st = affect.get_state(umo)
+        except Exception:
+            return ctx
+        pad = st.get("pad") or {}
+        ctx.update(
+            {
+                "p": float(pad.get("p") or 0.0),
+                "a": float(pad.get("a") or 0.0),
+                "d": float(pad.get("d") or 0.0),
+                "silence_sev": float(st.get("silence_sev") or 0.0),
+                "enabled": bool(getattr(affect, "enabled", lambda: False)()),
+            }
+        )
+        return ctx
+
+    def affect_multiplier(self, intent: str, ctx: dict) -> tuple:
+        """情感门控：(系数, 可读理由)。沮丧时分享降权、试探与关心升权。"""
+        if not self._cbool("motivation_affect_gate", True) or not ctx.get("enabled"):
+            return 1.0, ""
+        p = float(ctx.get("p") or 0.0)
+        a = float(ctx.get("a") or 0.0)
+        sev = float(ctx.get("silence_sev") or 0.0)
+        if intent == "share":
+            if p < -0.25:
+                return 0.45, "心情低落，提不起劲讲自己的事"
+            if p < 0.0:
+                return 0.6, "心情不太好，分享欲下降"
+            if p > 0.2 and a > 0.2:
+                return 1.25, "心情轻快，正想分享"
+            return 1.0, ""
+        if intent == "care":
+            if p < 0.05:
+                return 1.2, "自己不太好，反而更想关心对方"
+            return 1.0, ""
+        if intent == "followup":
+            if sev > 0.3:
+                return 1.15, "在意之前没说完的事"
+            return 1.05 if p < 0 else 1.0, ""
+        if intent == "curiosity":
+            if p < -0.1:
+                return 0.7, "低落时好奇心收窄"
+            if a > 0.15:
+                return 1.15, "精神好，愿意多想一步"
+            return 1.0, ""
+        if intent == "check_in":
+            if p < -0.1 or sev > 0.2:
+                return 1.5, "心里不踏实，想确认对方还在"
+            if p > 0.3:
+                return 0.7, "心情好，不急着确认"
+            return 1.1, ""
+        return 1.0, ""
+
+    def _best_pending_topic(self, umo: str, now_ts: float) -> tuple:
+        """从待接话题里挑「最近提到 + 学习门控最高」的一条。"""
+        s = self._sstate(umo)
+        best, best_w = "", 0.0
+        for item in s.get("pending") or []:
+            if not isinstance(item, dict):
+                continue
+            text = self._trim_topic(item.get("text"))
+            if not text:
+                continue
+            age_h = max(0.0, (now_ts - float(item.get("at") or now_ts)) / 3600.0)
+            recency = 0.5 ** (age_h / 48.0)  # 48 小时半衰：越久越不急着接
+            entry = s["topics"].get(text) or {}
+            weight = recency * self.learning_gate(entry)
+            if weight > best_w:
+                best, best_w = text, weight
+        return best, best_w
+
+    def reweight(self, umo: str, cands: list, now_dt: datetime) -> list:
+        """给候选意图乘上情感门控、学习进度门控与「具体由头」加分（GWA 的输入阶段）。"""
+        if not self.enabled() or not cands:
+            return cands
+        try:
+            now_ts = now_dt.timestamp()
+            ctx = self._affect_ctx(umo)
+            topic, topic_w = self._best_pending_topic(umo, now_ts)
+            out = []
+            for cand in cands:
+                if not isinstance(cand, dict):
+                    continue
+                c = dict(cand)
+                intent = str(c.get("intent") or "")
+                base = float(c.get("score") or 0.0)
+                mult, why_affect = self.affect_multiplier(intent, ctx)
+                gate, use_topic, why_learn = 1.0, "", ""
+                if intent in ("followup", "curiosity"):
+                    if topic:
+                        entry = self._sstate(umo)["topics"].get(topic) or {}
+                        gate = self.learning_gate(entry)
+                        use_topic = topic
+                        why_learn = f"学习进度门控×{gate:.2f}"
+                    else:
+                        gate = 0.35
+                        why_learn = "没有具体由头×0.35"
+                elif intent == "care" and topic:
+                    gate = 1.0 + 0.25 * min(1.0, topic_w)
+                    use_topic = topic
+                    why_learn = "关心有具体由头"
+                elif intent == "share":
+                    gate = 1.0 + 0.15 * min(1.0, topic_w)
+                score = base * mult * gate
+                if intent == "check_in":
+                    score += 0.25 * float(ctx.get("silence_sev") or 0.0)
+                c["score"] = round(max(0.01, score), 4)
+                c["topic"] = use_topic
+                reasons = [r for r in (why_affect, why_learn) if r]
+                c["why"] = "；".join(reasons)
+                out.append(c)
+            return out
+        except Exception as e:
+            logger.warning(f"[motivation] reweight 失败（退回原候选）: {e}")
+            return cands
+
+    def select(self, umo: str, cands: list, now_dt: datetime = None) -> dict:
+        """GWA 排他性瓶颈：一次只有一个候选赢得注意力，其余降权不删除。"""
+        if not self.enabled() or not cands:
+            return {}
+        try:
+            noise = self._cfloat("motivation_select_noise", 0.15)
+            scored = []
+            for c in cands:
+                if not isinstance(c, dict):
+                    continue
+                jitter = 1.0 if noise <= 0 else max(0.6, 1.0 - noise + 2 * noise * random.random())
+                scored.append((float(c.get("score") or 0.0) * jitter, c))
+            if not scored:
+                return {}
+            scored.sort(key=lambda x: x[0], reverse=True)
+            win_score, winner = scored[0]
+            loser_decay = max(0.5, min(1.0, self._cfloat("motivation_loser_decay", 0.85)))
+            losers = [
+                {"intent": str(c.get("intent") or ""), "score": round(s * loser_decay, 4)}
+                for s, c in scored[1:]
+            ]
+            s_state = self._sstate(umo)
+            s_state["last_competition"] = {
+                "at": (now_dt or self._living_now_safe()).timestamp(),
+                "winner": str(winner.get("intent") or ""),
+                "winner_score": round(win_score, 4),
+                "losers": losers[:6],
+            }
+            self._dirty = True
+            out = dict(winner)
+            out["score"] = round(win_score, 4)
+            logger.info(
+                f"[motivation] 注意力竞争：胜出={out.get('intent')}({win_score:.3f}) "
+                f"其余=" + ",".join(f"{x['intent']}:{x['score']:.2f}" for x in losers[:4])
+            )
+            return out
+        except Exception as e:
+            logger.warning(f"[motivation] select 失败（退回最高分）: {e}")
+            best = max(cands, key=lambda c: float((c or {}).get("score") or 0.0))
+            return dict(best)
+
+    @staticmethod
+    def _living_now_safe() -> datetime:
+        try:
+            return datetime.now()
+        except Exception:
+            return datetime(2026, 1, 1)
+
+    # ---------------------------- 可观测性 ---------------------------- #
+    def status(self) -> dict:
+        """给 /动机状态 与排障用：每个会话的话题、学习进度、最近一次竞争。"""
+        st = self._load()
+        sessions = {}
+        for sid, s in (st.get("sessions") or {}).items():
+            if not isinstance(s, dict):
+                continue
+            topics = []
+            for entry in (s.get("topics") or {}).values():
+                if not isinstance(entry, dict):
+                    continue
+                topics.append(
+                    {
+                        "topic": str(entry.get("topic") or ""),
+                        "attempts": int(entry.get("attempts") or 0),
+                        "engaged": int(entry.get("engaged") or 0),
+                        "progress": round(self.learning_progress(entry), 2),
+                        "gate": round(self.learning_gate(entry), 2),
+                    }
+                )
+            topics.sort(key=lambda t: (t["attempts"], t["engaged"]), reverse=True)
+            sessions[sid] = {
+                "topics": topics[:8],
+                "pending": [str(p.get("text") or "") for p in (s.get("pending") or []) if isinstance(p, dict)][-6:],
+                "last_intent": s.get("last_intent") or "",
+                "last_topic": s.get("last_topic") or "",
+                "competition": s.get("last_competition") or {},
+            }
+        return {"enabled": self.enabled(), "sessions": sessions}
+
 # 核心四：Elaina 表情包（本地表情库 + AI 选图，对齐原版 astrbot_plugin_Elaina_meme_Bridge）
 # LLM 回复后按概率触发：让 AI 根据对话内容从本地表情库里挑一张最合适的发送。
 # 只发本地素材，不做联网表情包搜索 —— 在线搜图容易「搜错、发错、被防盗链」。
@@ -7513,6 +8031,7 @@ class ElainaSuitePlugin(Star):
         self.living_memory = LivingMemoryCore(self)
         self.proactive_guard = ProactiveGuardCore(self)
         self.affect = AffectCore(self)
+        self.motivation = MotivationCore(self)
         self.meme = ElainaMemeCore(self)
         self.llm_guard = LlmGuardCore(self)
         self.system_health = SystemHealthCore(self)
@@ -7543,6 +8062,7 @@ class ElainaSuitePlugin(Star):
         await self.proactive_guard.initialize()
         await self.living_memory.initialize()
         await self.affect.initialize()
+        await self.motivation.initialize()
         await self.system_health.initialize()
         await self.meme.initialize()
 
@@ -7554,6 +8074,7 @@ class ElainaSuitePlugin(Star):
         await self.proactive_guard.terminate()
         await self.living_memory.close()
         await self.affect.close()
+        await self.motivation.close()
         await self.system_health.terminate()
 
     # ------------------------------------------------------------------ #
@@ -7652,6 +8173,38 @@ class ElainaSuitePlugin(Star):
         async for result in self.proactive_guard.living_status_command(event):
             yield result
 
+    @filter.command("动机状态", alias={"注意力状态"})
+    async def motivation_status_cmd(self, event: AstrMessageEvent):
+        """查看候选意图、学习进度门控与最近一次注意力竞争的结果。"""
+        st = self.motivation.status()
+        lines = [
+            "动机与注意力（阶段四 · GWA 竞争 + 内在动机）：",
+            "  启用：{}".format("是" if st.get("enabled") else "否"),
+        ]
+        sessions = st.get("sessions") or {}
+        if not sessions:
+            lines.append("  会话：无（还没有记录）")
+        for sid, info in sessions.items():
+            comp = info.get("competition") or {}
+            lines.append("  [{}] 最近意图：{}（话题：{}）".format(
+                str(sid)[:24],
+                info.get("last_intent") or "-",
+                (info.get("last_topic") or "-")[:16],
+            ))
+            if comp:
+                losers = "、".join(
+                    "{}:{:.2f}".format(x.get("intent"), float(x.get("score") or 0))
+                    for x in (comp.get("losers") or [])[:4]
+                )
+                lines.append("    上次竞争：{} 胜出（{:.2f}）；落选 {}".format(
+                    comp.get("winner") or "-", float(comp.get("winner_score") or 0), losers or "-"))
+            pend = info.get("pending") or []
+            lines.append("    待接话题：{}".format("；".join(pend[:4]) if pend else "无"))
+            for t in (info.get("topics") or [])[:5]:
+                lines.append("    · {}{}（发起 {} 次 / 回应 {} 次 / 学习进度 {:.2f} / 门控 ×{:.2f}）".format(
+                    "", (t.get("topic") or "")[:16], int(t.get("attempts") or 0),
+                    int(t.get("engaged") or 0), float(t.get("progress") or 0), float(t.get("gate") or 0)))
+        yield event.plain_result(chr(10).join(lines))
     @filter.command("情感状态", alias={"心情状态"})
     async def affect_status_cmd(self, event: AstrMessageEvent):
         """查看情感状态：PAD 三维、poignancy 累计、沉默严重度、最近情感事件。"""

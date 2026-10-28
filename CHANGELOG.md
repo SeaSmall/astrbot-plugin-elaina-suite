@@ -578,3 +578,26 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - 新增 `docs/PHASE3_REPORT.md`：逐条对照规格、三处对论文的显式偏离及理由（沉默评估为新增、衰减目标点可偏移、
   PAD→文字用分档词表代替 KNN）、配置项表、测试证据、遗留项。
 - 配置面板 132 → 143 项。
+
+## v1.5.0（2026-10-28）— 阶段四：自主性（注意力选择 + 内在动机）
+
+### 新增
+- **注意力选择（GWA 式排他性瓶颈）**：新增 `MotivationCore`，把主动消息的候选意图放进一次竞争——
+  每轮只有一个候选赢得生成焦点，落选者按 `motivation_loser_decay`（默认 0.85）降权记录、不删除，下次继续竞争；
+  竞争结果（winner/分数/落选者）可在 `/动机状态` 与 `motivation_state.json` 里查。
+- **内在动机 + 学习进度门控**：从用户消息里抽取「待接话题」，候选按 `progress = engaged/(attempts+1)`、
+  `gate = clamp(0.35+1.25×progress, 0.2, 1.4)` 打分——反复发起却没回应的话题被压到 0.35 附近，
+  得到回应的抬到 1.4 上限，避免「只追新不沉淀」。话题相似度用子串包含 + 2-gram 重叠（≥0.35）合并，
+  不引入分词依赖。
+- **情感门控耦合**：候选分数乘上 AffectCore 的情感系数（低落时 share 0.45、check_in 1.5；愉快时 share 1.25、
+  check_in 0.7），对应 Shanahan 2006「affect 介导 action selection」。
+- **具体由头注入**：选中的候选若挂到某条待接话题，`_living_compose` 的提示词会带上「具体到：xxx」，
+  避免「追问」退化成空泛寒暄。
+- 新增 `/动机状态`（别名 `/注意力状态`）与 8 个 `motivation_*` 配置键（默认全部关闭，行为与 v1.4.0 一致）。
+
+### 其它
+- 新增 `tests/test_motivation.py`（10 组：关闭空操作/话题合并/学习进度/情感门控/重加权/竞争/持久化/上限与数据面/接线/配置）；
+  `test_merged.py` 24 组、`test_living.py` 12 组、`test_affect.py` 12 组、`test_memory.py` 10 组回归全过。
+- `_living_plan_intent` 改为 async 以承载竞争选择；`_living_on_user_message` 增加文本参数用于话题抽取。
+- 新增 `docs/PHASE4_REPORT.md`：候选池/评分公式/情感门控表/学习进度/配置/可观测性/测试证据/三处偏离/遗留。
+- 配置面板 143 → 151 项。

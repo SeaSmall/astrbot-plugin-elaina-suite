@@ -354,7 +354,7 @@ async def t9_quiet_hours_skip_and_defer():
     state = await core2._living_load()
     s = core2._living_sstate(state, UMO)
     s["last_user_at"] = night2.timestamp() - 7200
-    plan = core2._living_plan_intent(UMO, s, night2)
+    plan = await core2._living_plan_intent(UMO, s, night2)
     assert plan, plan
     fire_dt = core2._living_dt(plan["fire_at"])
     assert not core2._living_in_quiet(fire_dt), fire_dt
