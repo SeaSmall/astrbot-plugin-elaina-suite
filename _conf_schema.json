@@ -537,6 +537,31 @@
     "max": 95,
     "description": "召回相似度阈值（百分比）。越低越容易召回无关记忆，建议 40~55。"
   },
+  "mem0_affect_recall": {
+    "type": "bool",
+    "description": "情感调制召回（阶段六 · 负面情绪下优先情绪一致/未解决事项）",
+    "default": true
+  },
+  "mem0_affect_boost_pct": {
+    "type": "int",
+    "description": "情绪一致记忆的相似度加成（百分点，按负面强度缩放）",
+    "default": 18,
+    "slider": {
+      "min": 0,
+      "max": 50,
+      "step": 1
+    }
+  },
+  "mem0_unresolved_boost_pct": {
+    "type": "int",
+    "description": "未解决事项记忆的相似度加成（百分点）",
+    "default": 12,
+    "slider": {
+      "min": 0,
+      "max": 50,
+      "step": 1
+    }
+  },
   "mem0_seed_facts": {
     "type": "bool",
     "default": true,

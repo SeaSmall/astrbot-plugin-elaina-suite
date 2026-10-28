@@ -259,10 +259,55 @@ async def m9_wiring():
     print("[M9] 插件接线完整（构造/初始化/收尾/写入钩子/状态命令/召回注入） OK")
 
 
+async def m11_affect_rerank():
+    """阶段六：负面情绪下情绪一致/未解决事项被抬到前面；中性时原序不动。"""
+    e = make_engine(mem0_top_k=3)
+    mem = await e._ensure()
+    mem.search_hits = [
+        {"memory": "对方喜欢在雨天听爵士乐", "score": 0.62},
+        {"memory": "对方说最近老是失眠，压力很大", "score": 0.55},
+        {"memory": "对方提过下个月体检，还没定哪天", "score": 0.50},
+    ]
+    neutral = await e.recall_block("最近怎么样", "u1", affect={"pad": {"p": 0.5}, "silence_sev": 0.0})
+    assert neutral.index("爵士乐") < neutral.index("失眠"), "中性时按相似度原序"
+    neg = await e.recall_block("最近怎么样", "u1", affect={"pad": {"p": -0.4}, "silence_sev": 0.0})
+    assert neg.index("失眠") < neg.index("爵士乐"), ("负面时应把情绪一致记忆抬上来", neg)
+    assert "体检" in neg, "未解决事项也要保留"
+    # 三重候选只取前 base_k 条
+    assert neg.count("- ") <= 3
+    print("[M11] 情感调制召回：负面优先情绪一致/未解决，中性原序 OK")
+
+
+async def m12_affect_recall_switch():
+    e = make_engine(mem0_top_k=2, mem0_affect_recall=False)
+    mem = await e._ensure()
+    mem.search_hits = [
+        {"memory": "对方喜欢在雨天听爵士乐", "score": 0.62},
+        {"memory": "对方说最近老是失眠，压力很大", "score": 0.55},
+    ]
+    off = await e.recall_block("最近怎么样", "u1", affect={"pad": {"p": -0.6}, "silence_sev": 0.0})
+    assert off.index("爵士乐") < off.index("失眠"), ("关闭调制应按相似度", off)
+    assert "top_k" in str(mem.calls[-1][2]), "search 契约不变"
+    print("[M12] 关闭情感调制时退回纯相似度 OK")
+
+
+async def m13_affect_wiring():
+    src = io.open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    for needle in ("MEMORY_NEGATIVE_HINTS", "MEMORY_UNRESOLVED_HINTS",
+                   "def rerank_affect(", "def _affect_context(",
+                   "mem0_affect_recall", "mem0_affect_boost_pct", "mem0_unresolved_boost_pct"):
+        assert needle in src, needle
+    assert "recall_block(query, umo, affect=affect_state)" in src
+    assert "mem0_affect_recall" in src and "top_k=min(24, base_k * 3)" in src
+    print("[M13] 阶段六接线：词表/重排/配置键/召回扩大候选 OK")
+
+
+
 async def main():
     for fn in [m1_disabled, m2_singleton, m3_search_contract, m4_recall_block,
                m5_seed_idempotent, m6_buffered_write, m7_failure_degrade, m8_close, m9_wiring,
-               m10_seed_sees_all_beyond_default_limit]:
+               m10_seed_sees_all_beyond_default_limit, m11_affect_rerank,
+               m12_affect_recall_switch, m13_affect_wiring]:
         await fn()
     print("阶段二（long-term memory）测试全部通过")
 

@@ -624,3 +624,34 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
   `test_living.py` 11 组断言按新流程更新（生成提示词与审校提示词分开取样）；回归 merged 24 / living 12 / affect 12 / memory 10 / motivation 10 全过。
 - 新增 `docs/PHASE5_REPORT.md`：诊断、三路径、硬约束、加密分档、审校、对话注入、偏离、测试证据。
 - 配置面板 151 → 156 项（`tsundere_enabled` / `tsundere_review_enabled` / `tsundere_encrypt_negative` / `tsundere_max_retry` / `tsundere_chat_inject`）。
+
+## v1.7.0（2026-10-28）
+
+### 问题
+- **情感从来没被下游读到**：四处调用点写 `getattr(core, "enabled", lambda: False)()`，
+  而 `AffectCore` 用 `_on()` 表示启用 → 返回 False，情感门控、傲娇加密档位、记忆块情感上下文、
+  召回情感调制**全部静默失效**。情感在更新、在落盘、命令也能看，但没有一个下游用它。
+  之前的单元测试与真机验证都用带 `enabled()` 的 Fake 打桩，所以四个阶段都没暴露。
+- Mem0 召回只按向量相似度排序：情绪低落时，最能说明处境的记忆（失眠、压力、吵架）
+  未必比一条无关事实更靠前，等于"记得但不会用"。
+
+### 改动
+- 新增 `_core_enabled(core)`（`main.py:575`）：统一判断核心是否启用，依次尝试 `enabled()` 与 `_on()`，
+  异常返回 False；四处调用点（`5216` / `5251` / `5782` / `6949`）改为调用它。
+- 情感调制召回（`mem0_affect_recall` 默认开）：`_affect_context()` 把 PAD 与沉默严重度折成
+  `negative = clamp(-p*1.6 + sev*0.6, 0, 1)`；`rerank_affect()` 给命中
+  `MEMORY_NEGATIVE_HINTS`（情绪一致）与 `MEMORY_UNRESOLVED_HINTS`（未解决事项）的记忆加权；
+  `recall_block()` 在 negative > 0.05 时先把候选扩到 `min(24, base_k*3)` 再收敛。
+  首位有加成时打日志，便于观察。
+- 三个新配置键：`mem0_affect_recall` / `mem0_affect_boost_pct`(18) / `mem0_unresolved_boost_pct`(12)。
+
+### 其它
+- `tests/test_affect.py` 新增 A13（低落 PAD 真的传到下游：share 系数 0.45、check_in 1.5、
+  傲娇 2 档、`negative > 0.5`）、A14（`_core_enabled` 兼容两种写法 + 旧写法 0 残留）；
+  `tests/test_memory.py` 新增 M11/M12/M13。回归 merged 24 / living 12 / affect 14 / memory 13 /
+  motivation 10 / tsundere 10 全过。
+- 新增 `docs/PHASE6_REPORT.md`：五项彻查的规格对照、真机数字（PAD 轨迹、候选池与 winner、
+  召回重排分数）、僵尸功能表、设定分层表、偏离与遗留。
+- 真机验证（1.7.0）：`sha256=8fc1bcd4…` 与本地一致、重启 0 Traceback、
+  `[memory] 情感调制召回：负面强度=1.00 首位加成=0.180（情绪一致）`。
+- 配置面板 156 → 159 项。

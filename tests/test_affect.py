@@ -253,10 +253,64 @@ async def a12_baseline():
             and abs(pad2["d"] - 0.3) < 1e-9), pad2
     print("[A12] 基线取 persona.json 的 pleasure/arousal/dominance（不被 pleasure 兜底）+ 覆盖生效 OK")
 
+async def a13_downstream_coupling():
+    """情感状态必须真的被下游读到：情感门控 / 傲娇加密 / 召回调制。"""
+    core = make_core()
+    seed(core, {"p": -0.40, "a": 0.30, "d": 0.20})
+    owner = core.owner
+    owner.affect = core
+
+    mot = mod.MotivationCore(owner)
+    ctx = mot._affect_ctx(UMO)
+    assert ctx["enabled"] is True, "情感没被识别为启用（enabled 恒 False 的旧 bug）"
+    assert abs(ctx["p"] + 0.40) < 1e-6, ctx
+    share_mult, share_why = mot.affect_multiplier("share", ctx)
+    check_mult, check_why = mot.affect_multiplier("check_in", ctx)
+    assert abs(share_mult - 0.45) < 1e-9, share_mult
+    assert abs(check_mult - 1.5) < 1e-9, check_mult
+    assert share_why and check_why
+
+    guard = mod.ProactiveGuardCore(owner)
+    assert guard._tsundere_encrypt_level(UMO) == 2, "低落时傲娇加密应为 2 档"
+
+    mem = mod.LivingMemoryCore(owner)
+    neg = mem._affect_context(UMO)
+    assert neg["negative"] > 0.5, neg
+    assert neg["p"] < -0.3, neg
+    print("[A13] 低落 PAD 真的传到下游：情感门控 share<1 / check_in>1、傲娇加密=2、召回负面强度>0.5 OK")
+
+
+async def a14_core_enabled_helper():
+    class OnlyOn:
+        def _on(self):
+            return True
+
+    class OnlyEnabled:
+        def enabled(self):
+            return True
+
+    class Boom:
+        def enabled(self):
+            raise RuntimeError("x")
+
+    assert mod._core_enabled(None) is False
+    assert mod._core_enabled(OnlyOn()) is True
+    assert mod._core_enabled(OnlyEnabled()) is True
+    assert mod._core_enabled(Boom()) is False
+
+    src = io.open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    assert "def _core_enabled(core) -> bool:" in src
+    assert 'getattr(core, "enabled", lambda: False)()' not in src, "旧写法必须清除"
+    assert 'getattr(affect, "enabled", lambda: False)()' not in src
+    assert src.count("_core_enabled(") >= 6
+    print("[A14] _core_enabled 兼容 enabled()/_on()/异常，且四处调用点已统一 OK")
+
+
 async def main():
     for fn in [a1_decay_half_life, a2_disabled, a3_fast_channel, a4_slow_reflect,
                a5_silence_channel, a6_silence_decay_target, a7_describe, a8_persist,
-               a9_wiring, a10_schema, a11_json_objects, a12_baseline]:
+               a9_wiring, a10_schema, a11_json_objects, a12_baseline,
+               a13_downstream_coupling, a14_core_enabled_helper]:
         await fn()
     print("阶段三（情感状态）测试全部通过")
 

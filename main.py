@@ -572,6 +572,25 @@ WORLDVIEW_ASSET = os.path.join("assets", "worldview.json")
 _ASSET_CACHE: dict[str, dict] = {}
 
 
+def _core_enabled(core) -> bool:
+    """统一判断某个核心是否启用：优先 enabled()，其次 _on()（各核心内部命名不同）。
+
+    阶段六审计发现：AffectCore 用 _on() 表达启用，而此前四处调用点都写
+    _core_enabled(core)，导致情感门控/傲娇加密/召回调制在真机上
+    全部静默失效（情感状态确实在更新，但没有任何下游读到它）。这里统一收口。
+    """
+    if core is None:
+        return False
+    for name in ("enabled", "_on"):
+        fn = getattr(core, name, None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                return False
+    return False
+
+
 def _load_plugin_json_asset(rel_path: str) -> dict:
     """读插件目录下的 JSON 资源（按 mtime 缓存）；任何异常都返回 {}，绝不抛出。"""
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -5192,7 +5211,14 @@ class ProactiveGuardCore(_PluginCoreBase):
             if engine is not None:
                 try:
                     query = engine.recent_text(umo) or "对方最近的状态与近况"
-                    block = await engine.recall_block(query, umo)
+                    affect_state = None
+                    core = getattr(self.owner, "affect", None)
+                    if core is not None and _core_enabled(core):
+                        try:
+                            affect_state = core.get_state(umo) or {}
+                        except Exception:
+                            affect_state = None
+                    block = await engine.recall_block(query, umo, affect=affect_state)
                     if block:
                         parts.append(block.strip())
                 except Exception as e:
@@ -5222,7 +5248,7 @@ class ProactiveGuardCore(_PluginCoreBase):
         if not self._cfg_bool("tsundere_encrypt_negative", True):
             return 0
         core = getattr(self.owner, "affect", None)
-        if core is None or not getattr(core, "enabled", lambda: False)():
+        if core is None or not _core_enabled(core):
             return 0
         try:
             st = core.get_state(umo) or {}
@@ -5535,6 +5561,15 @@ MEM0_RECALL_TEMPLATE = """
 {memories}
 """
 
+# 阶段六：情感调制的记忆召回——负面情绪下优先情绪一致/未解决事项，而不是随机事实。
+MEMORY_NEGATIVE_HINTS = (
+    "累", "难受", "疼", "失眠", "压力", "烦", "吵架", "失败", "担心", "生病",
+    "加班", "难过", "哭", "焦虑", "委屈", "熬夜", "赶", "病", "冷", "饿", "想哭",
+)
+MEMORY_UNRESOLVED_HINTS = (
+    "还没", "没定", "待", "下次", "回头", "要记得", "答应", "说好", "没做完",
+    "没决定", "过两天", "再看", "等消息", "面试", "体检", "出差", "考试",
+)
 
 def _mem_detect_anthropic() -> dict:
     """从 AstrBot 的 cmd_config.json 里找一个可用的 anthropic 兼容 provider。"""
@@ -5740,6 +5775,64 @@ class LivingMemoryCore(_PluginCoreBase):
             logger.warning(f"[memory] 种子记忆写入失败: {e}")
 
     # ---------------------------- 召回 ---------------------------- #
+    def _affect_context(self, umo: str, affect: dict | None = None) -> dict:
+        """取当前情感（p / 沉默严重度）并折算成 0~1 的负面强度，用于召回调制。"""
+        if affect is None:
+            core = getattr(self.owner, "affect", None)
+            if core is not None and _core_enabled(core):
+                try:
+                    affect = core.get_state(umo) or {}
+                except Exception:
+                    affect = {}
+        affect = affect or {}
+        pad = affect.get("pad") or {}
+        try:
+            p = float(pad.get("p") or 0.0)
+        except Exception:
+            p = 0.0
+        try:
+            sev = float(affect.get("silence_sev") or 0.0)
+        except Exception:
+            sev = 0.0
+        negative = max(0.0, min(1.0, (-p) * 1.6 + sev * 0.6))
+        return {"p": p, "sev": sev, "negative": negative}
+
+    def rerank_affect(self, hits: list, umo: str, affect: dict | None = None) -> list:
+        """负面情绪下把「情绪一致」与「未解决」的记忆往上抬；中性时原样返回。"""
+        if not hits or not self._cfg_bool("mem0_affect_recall", True):
+            return hits
+        ctx = self._affect_context(umo, affect)
+        if ctx["negative"] <= 0.05:
+            return hits
+        neg_w = max(0, min(100, self._cfg_int("mem0_affect_boost_pct", 18))) / 100.0
+        unr_w = max(0, min(100, self._cfg_int("mem0_unresolved_boost_pct", 12))) / 100.0
+        scored = []
+        for it in hits:
+            text = str(it.get("memory") or "")
+            try:
+                sim = float(it.get("score") or 0.0)
+            except Exception:
+                sim = 0.0
+            boost = 0.0
+            reasons = []
+            if any(w in text for w in MEMORY_NEGATIVE_HINTS):
+                boost += neg_w * ctx["negative"]
+                reasons.append("情绪一致")
+            if any(w in text for w in MEMORY_UNRESOLVED_HINTS):
+                boost += unr_w
+                reasons.append("未解决")
+            item = dict(it)
+            item["_rank"] = sim + boost
+            item["_boost"] = round(boost, 3)
+            item["_why"] = "+".join(reasons)
+            scored.append(item)
+        scored.sort(key=lambda x: (-float(x.get("_rank") or 0), -float(x.get("score") or 0)))
+        if scored and float(scored[0].get("_boost") or 0) > 0:
+            logger.info(
+                f"[memory] 情感调制召回：负面强度={ctx['negative']:.2f} "
+                f"首位加成={scored[0]['_boost']:.3f}（{scored[0]['_why']}）"
+            )
+        return scored
     async def search(self, query: str, umo: str, top_k: int = 0) -> list:
         if not self._on() or not str(query or "").strip():
             return []
@@ -5767,17 +5860,20 @@ class LivingMemoryCore(_PluginCoreBase):
                 out.append(it)
         return out
 
-    async def recall_block(self, query: str, umo: str, chars: int = 0) -> str:
-        """把召回结果拼成提示词块；没有命中或不可用时返回空串。"""
+    async def recall_block(self, query: str, umo: str, chars: int = 0, affect: dict | None = None) -> str:
+        """把召回结果拼成提示词块；负面情绪下按情绪一致/未解决重排（阶段六）。"""
         if not self._on():
             return ""
+        base_k = int(self._cfg_int("mem0_top_k", 6))
+        widen = self._cfg_bool("mem0_affect_recall", True) and self._affect_context(umo, affect)["negative"] > 0.05
         try:
-            hits = await self.search(query, umo)
+            hits = await self.search(query, umo, top_k=min(24, base_k * 3) if widen else 0)
         except Exception as e:
             logger.warning(f"[memory] 召回块构建失败: {e}")
             return ""
         if not hits:
             return ""
+        hits = self.rerank_affect(hits, umo, affect)[:base_k]
         lines = []
         for it in hits[:8]:
             text = " ".join(str(it.get("memory") or "").split())
@@ -6850,7 +6946,7 @@ class MotivationCore(_PluginCoreBase):
                 "a": float(pad.get("a") or 0.0),
                 "d": float(pad.get("d") or 0.0),
                 "silence_sev": float(st.get("silence_sev") or 0.0),
-                "enabled": bool(getattr(affect, "enabled", lambda: False)()),
+                "enabled": bool(_core_enabled(affect)),
             }
         )
         return ctx
