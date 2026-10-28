@@ -681,3 +681,29 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - 真机：容器内实测人格块 **1140 字**；从本地语音通道连发 4 句，日志 4 次
   `[persona] 已向对话 system prompt 注入插件人格（1140 字）`，回复为傲娇短句（「被说就难受成这样？……过来，先吃饭」）。
 - 配置面板 159 → 161 项。
+
+## v1.9.0（2026-10-28）
+
+### 问题
+- 记忆与情感状态都按「会话 UMO」分桶：本机语音通道（`webchat_phone!alice!main`）与 QQ 主会话
+  是两份互不相通的记忆、两套 PAD。实测同一句话在语音里说完，QQ 会话的 PAD 仍是基线 0.15/0.25/0.70，
+  记忆写入也落在 `u_webchat_...` 命名空间里 —— 等于"她在电话里认识的那个人"和"QQ 里认识的那个人"不是同一个。
+- 语音会话因为用户说话被 `_living_on_user_message` 排上了主动消息决策，但该会话没有常驻监听方，
+  一旦决策通过就会往没人收的会话发一条（占配额、无意义）。
+
+### 改动
+- 新增 `shared_scope_enabled`(默认 false) / `shared_scope_id`(默认空，空则用 shared) 两个配置键；
+  开启后 `LivingMemoryCore._uid()` / `AffectCore._sid()` / `MotivationCore._sid()` 统一归一到
+  `u_shared_<id>` 与 `shared_<id>`，QQ、语音、其他平台共用一份长期记忆与同一套情感 / 动机状态。
+  **关闭时行为与 v1.8.0 完全一致**（按会话隔离），不影响多用户场景。
+- `_living_decide()` 增加目标会话守卫：不在 `_collect_target_sessions()` 里的会话直接跳过，
+  不再排「发了也没人收」的主动消息。
+- 新增测试：M14（跨通道同一 user_id / 关闭隔离 / 空值回退 / 非法字符清洗）、
+  A15（语音与 QQ 同一份 PAD）、N11（同一份话题与学习进度）、L13（非目标会话不排主动消息不写状态）。
+
+### 其它
+- 配置面板 161 → 163 项。
+- 真机：语音通道实发 4 句确认人格注入 ×4（`[persona] ...（1140 字）`）、情感与动机均按会话更新；
+  开启共享后两个通道读到的 PAD 与记忆命名空间一致。
+- 服务器同步清理：删除 `skills/elaina-agent` 与 `skills/unclecheng-reduce-ai-perception-v2`
+  （备份在 `<data>/_skill_bak_*`），并把人 `personas.elaina_v2_notools.skills` 中的这两项摘掉。

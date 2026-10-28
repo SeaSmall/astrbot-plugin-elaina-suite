@@ -696,6 +696,16 @@
       "step": 100
     }
   },
+  "shared_scope_enabled": {
+    "type": "bool",
+    "description": "跨会话共享记忆与情感：开启后同一个人的 QQ 会话、语音通道（webchat_phone）等共用一份长期记忆（mem0）与同一套 PAD 情感 / 动机状态；关闭则每个会话各自一份（旧行为）",
+    "default": false
+  },
+  "shared_scope_id": {
+    "type": "string",
+    "description": "共享作用域 id（共享开启后生效）：所有会话都归一成这个 id，例如填 alice。留空则用 shared",
+    "default": ""
+  },
   "tsundere_enabled": {
     "type": "bool",
     "description": "启用傲娇三路径（阶段五 · 行动先行+借口收尾 / 毒舌包裹真实信息 / 关心以「泄露」出现）",

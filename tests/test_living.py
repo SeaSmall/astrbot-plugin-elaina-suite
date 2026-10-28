@@ -418,6 +418,19 @@ async def t12_timing_words():
     print("[L12] 时段词 / 人话时长 / quiet=off 解析 OK")
 
 
+
+async def t13_skip_non_target_session():
+    """非目标会话（如语音通道）不排主动消息：避免往没人收的会话白发。"""
+    core = make_core()
+    await core.initialize()
+    other = "webchat_phone!alice!main"
+    await core._living_decide(other)
+    state = await core._living_load()
+    assert other not in (state.get("sessions") or {}), state.get("sessions")
+    assert not core.sent, core.sent
+    await core.terminate()
+    print("[L13] 非目标会话不排主动消息、不写状态 OK")
+
 def main():
     run(t1_living_never_uses_cron_manager)
     run(t2_disabled_keeps_old_path)
@@ -431,6 +444,7 @@ def main():
     run(t10_state_atomic_and_corrupt_recovery)
     run(t11_prompt_blocks_and_hard_filters)
     run(t12_timing_words)
+    run(t13_skip_non_target_session)
     print("阶段一（living）测试全部通过")
 
 

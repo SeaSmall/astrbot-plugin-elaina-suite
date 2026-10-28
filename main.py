@@ -591,6 +591,37 @@ def _core_enabled(core) -> bool:
     return False
 
 
+def _config_truthy(value) -> bool:
+    """把配置值（可能是 bool / "true" / "1" / 数字）统一判成真假。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "是", "开")
+
+
+def _shared_scope_id(config) -> str:
+    """跨会话共享作用域 id：空串表示按会话隔离（默认，行为与旧版一致）。
+
+    为什么需要它：记忆（mem0 user_id）与情感/动机状态原先都按「会话 UMO」分桶，
+    同一个人在 QQ 里聊、在语音通道（webchat_phone）里说话，会得到两份互不相通的
+    记忆与两套 PAD。开启 shared_scope_enabled 后，所有会话都归一到一个 id，
+    于是"她在微信/QQ 里记得的事"和"电话里记得的事"是同一份。
+    """
+    if not isinstance(config, dict):
+        try:
+            config = dict(config or {})
+        except Exception:
+            return ""
+    if not _config_truthy(config.get("shared_scope_enabled")):
+        return ""
+    raw = str(config.get("shared_scope_id") or "").strip() or "shared"
+    out = re.sub(r"[^0-9A-Za-z_-]+", "_", raw).strip("_")[:40]
+    return out or "shared"
+
+
 def _load_plugin_json_asset(rel_path: str) -> dict:
     """读插件目录下的 JSON 资源（按 mtime 缓存）；任何异常都返回 {}，绝不抛出。"""
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -5027,6 +5058,16 @@ class ProactiveGuardCore(_PluginCoreBase):
     async def _living_decide(self, umo: str) -> None:
         if not self._living_on():
             return
+        # 只给「目标会话」排主动消息。语音通道（webchat_phone）这类会话也会因为
+        # 用户说话而被 _living_on_user_message 排上下一次决策，但它没有常驻监听方，
+        # 往那儿发等于白发（还会占掉当天的配额），所以这里直接跳过、不再续排。
+        try:
+            targets = await self._collect_target_sessions()
+        except Exception:
+            targets = []
+        if targets and umo not in targets:
+            logger.info(f"[living] 非目标会话，跳过主动消息决策: {umo}")
+            return
         state = await self._living_load()
         s = self._living_sstate(state, umo)
         now_dt = self._living_now()
@@ -5784,6 +5825,10 @@ class LivingMemoryCore(_PluginCoreBase):
         return "".join(out)[:80] or "default"
 
     def _uid(self, umo: str) -> str:
+        # 跨会话共享：同一个人在 QQ / 语音通道里有同一份长期记忆（默认关闭，按会话隔离）
+        shared = _shared_scope_id(self.config)
+        if shared:
+            return "u_shared_" + shared
         return "u_" + self._sid(umo)
 
     def _data_dir(self) -> str:
@@ -6271,8 +6316,11 @@ class AffectCore(_PluginCoreBase):
         data = _plugin_data_dir()
         return os.path.join(data, "affect_state.json") if data else ""
 
-    @staticmethod
-    def _sid(umo: str) -> str:
+    def _sid(self, umo: str) -> str:
+        # 跨会话共享：语音通道与 QQ 主会话共用同一份 PAD 情感状态（默认关闭）
+        shared = _shared_scope_id(self.config)
+        if shared:
+            return "shared_" + shared
         return re.sub(r"[^0-9A-Za-z_]+", "_", str(umo or ""))[:80] or "default"
 
     def _lock(self, umo: str) -> asyncio.Lock:
@@ -6874,6 +6922,10 @@ class MotivationCore(_PluginCoreBase):
         return os.path.join(_plugin_data_dir(), "motivation_state.json")
 
     def _sid(self, umo: str) -> str:
+        # 跨会话共享：语音通道与 QQ 主会话共用话题/学习进度（默认关闭）
+        shared = _shared_scope_id(self.config)
+        if shared:
+            return "shared_" + shared
         return re.sub(r"[^0-9A-Za-z_]+", "_", str(umo or ""))[:80]
 
     def _get_lock(self):

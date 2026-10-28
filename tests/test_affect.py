@@ -306,11 +306,25 @@ async def a14_core_enabled_helper():
     print("[A14] _core_enabled 兼容 enabled()/_on()/异常，且四处调用点已统一 OK")
 
 
+async def a15_shared_scope():
+    """跨会话共享作用域：QQ 与语音通道共用同一份 PAD（默认关闭时各一份）。"""
+    QQ = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
+    PHONE = "webchat_phone!alice!main"
+    shared = make_core(shared_scope_enabled=True, shared_scope_id="alice")
+    assert shared._sid(QQ) == shared._sid(PHONE) == "shared_alice"
+    await shared.fast_update(QQ, "你真是太厉害了，好棒，太强了", "哼，这不是当然的吗")
+    st = shared.get_state(PHONE)
+    assert abs(st["pad"]["p"] - 0.15) > 0.02, st["pad"]
+    iso = make_core()
+    assert iso._sid(QQ) != iso._sid(PHONE)
+    print("[A15] 共享作用域：语音与 QQ 同一份 PAD；关闭时按会话隔离 OK")
+
+
 async def main():
     for fn in [a1_decay_half_life, a2_disabled, a3_fast_channel, a4_slow_reflect,
                a5_silence_channel, a6_silence_decay_target, a7_describe, a8_persist,
                a9_wiring, a10_schema, a11_json_objects, a12_baseline,
-               a13_downstream_coupling, a14_core_enabled_helper]:
+               a13_downstream_coupling, a14_core_enabled_helper, a15_shared_scope]:
         await fn()
     print("阶段三（情感状态）测试全部通过")
 

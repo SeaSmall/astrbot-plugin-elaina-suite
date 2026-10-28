@@ -303,11 +303,31 @@ async def m13_affect_wiring():
 
 
 
+async def m14_shared_scope():
+    """跨会话共享作用域：语音通道与 QQ 共用同一个 mem0 user_id（默认关闭时按会话隔离）。"""
+    qq = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
+    phone = "webchat_phone!alice!main"
+    on = make_engine(shared_scope_enabled=True, shared_scope_id="alice")
+    assert on._uid(qq) == on._uid(phone) == "u_shared_alice", (on._uid(qq), on._uid(phone))
+    await on.search("布丁", qq)
+    await on.search("布丁", phone)
+    calls = [c for c in FakeMemory.instances[0].calls if c[0] == "search"]
+    assert calls[0][2]["filters"]["user_id"] == "u_shared_alice"
+    assert calls[1][2]["filters"]["user_id"] == "u_shared_alice"
+    off = make_engine()
+    assert off._uid(qq) != off._uid(phone), "关闭时必须按会话隔离"
+    blank = make_engine(shared_scope_enabled=True, shared_scope_id="  ")
+    assert blank._uid(qq) == "u_shared_shared"
+    bad = make_engine(shared_scope_enabled=True, shared_scope_id="家/里 NAS")
+    assert bad._uid(qq) == "u_shared_NAS", bad._uid(qq)
+    print("[M14] 共享作用域：跨通道同一 user_id / 关闭时隔离 / 空值回退 shared OK")
+
+
 async def main():
     for fn in [m1_disabled, m2_singleton, m3_search_contract, m4_recall_block,
                m5_seed_idempotent, m6_buffered_write, m7_failure_degrade, m8_close, m9_wiring,
                m10_seed_sees_all_beyond_default_limit, m11_affect_rerank,
-               m12_affect_recall_switch, m13_affect_wiring]:
+               m12_affect_recall_switch, m13_affect_wiring, m14_shared_scope]:
         await fn()
     print("阶段二（long-term memory）测试全部通过")
 

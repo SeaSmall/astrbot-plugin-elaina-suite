@@ -37,6 +37,8 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 
 > 🆕 **整合自洽（阶段六 · 情感调制召回 + 全链路一致性彻查，`mem0_affect_recall`，默认开启）**：记忆不再是「谁相似就召回谁」——低落时（愉悦度低 / 沉默久）会把**情绪一致的记忆**（累、失眠、压力、吵架、生病…）与**没解决的事项**（还没定、答应过、要记得、体检、面试…）加权抬到前面，随机事实不动，打日志 `[memory] 情感调制召回：…`。这一阶段还查出并修掉一个致命的集成 bug：四处下游用 `getattr(core, "enabled", …)` 判断情感是否启用，而 `AffectCore` 只实现了 `_on()`，导致情感门控 / 傲娇加密 / 召回调制**全部静默失效**——现在统一走 `_core_enabled()`，并加了 A13/A14 两条防止回退的测试。彻查报告（情感真流动 / 意图与情感记忆人格一致 / 召回被情感调制 / 无僵尸功能 / 设定分层）见 [`docs/PHASE6_REPORT.md`](docs/PHASE6_REPORT.md)。
 
+> 🆕 **跨会话共享记忆与情感（阶段八 · `shared_scope_enabled`，默认关闭）**：记忆（mem0 的 user_id）与情感 / 动机状态原先都按「会话」分桶——同一个人在 QQ 里聊、在语音通道（`webchat_phone`）里说话，会得到两份互不相通的记忆和两套 PAD。开启后（并填好 `shared_scope_id`，例如 `alice`）所有会话都归一到同一个 id：**电话里说过的事，QQ 里她记得；QQ 里被气到，电话里语气也还是冷的**。主动消息仍只发 `pg_target_sessions` 里的目标会话（语音会话不再被排上「没人收的主动消息」）。
+
 > 🆕 **人格常驻注入（阶段七 · 插件自带人格，`persona_inject_enabled`，默认开启）**：以前「像不像伊蕾娜」取决于服务器上那份 persona 配得怎么样；现在插件自己把 `assets/persona.json` 压成约 1140 字的 `【身份底稿：你是伊蕾娜（灰之魔女）】`——身份（物种/出身/年龄/外貌/自称/禁自称）、性格（前 6 条特质）、说话（译腔 + 「一条回复最多 25 字、默认 1 句、最多 2 句」这类硬约束 + 句尾语气词）、习惯、关系、铁律六段——在**每次** LLM 请求时追加到 system prompt 末尾（不覆盖原提示词，先人格底稿再傲娇写法，两段各自幂等、可分别关闭）。真机实测：从本地语音通道（`webchat_phone` 会话）发消息，日志出现 `[persona] 已向对话 system prompt 注入插件人格（1140 字）`，回复自动带傲娇短句。长度上限 `persona_inject_chars`（默认 2400）。
 
 > 🆕 **傲娇表达（阶段五 · 三条行为路径 + 零容忍元话语，`tsundere_enabled`，默认开启）**：傲娇不再被写成可以直接说出口的标签
@@ -104,6 +106,7 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - **长期记忆（阶段二 · mem0）**：`mem0_enabled` / `mem0_llm_model` / `mem0_llm_base_url` / `mem0_llm_api_key` / `mem0_embed_model` / `mem0_top_k` / `mem0_threshold_pct` / `mem0_seed_facts` / `mem0_flush_turns` / `mem0_recall_chars` / `mem0_infer` / `mem0_affect_recall` / `mem0_affect_boost_pct` / `mem0_unresolved_boost_pct`
 - **动机与注意力（阶段四 · GWA 竞争 + 内在动机）**：`motivation_enabled` / `motivation_affect_gate` / `motivation_learning_gate` / `motivation_topic_max` / `motivation_topic_chars` / `motivation_engage_window_minutes` / `motivation_select_noise` / `motivation_loser_decay`
 - **人格常驻注入（阶段七）**：`persona_inject_enabled` / `persona_inject_chars`
+- **跨会话共享（阶段八）**：`shared_scope_enabled` / `shared_scope_id`
 - **傲娇表达（阶段五 · 三路径 + 审校）**：`tsundere_enabled` / `tsundere_review_enabled` / `tsundere_encrypt_negative` / `tsundere_max_retry` / `tsundere_chat_inject`
 - **情感状态（阶段三 · Sentipolis PAD）**：`affect_enabled` / `affect_fast_mode` / `affect_decay_half_life_minutes` / `affect_silence_threshold_minutes` / `affect_silence_check_minutes` / `affect_silence_cooldown_minutes` / `affect_silence_target` / `affect_reflect_poignancy` / `affect_slow_delta_cap` / `affect_inject_chars` / `affect_baseline`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`

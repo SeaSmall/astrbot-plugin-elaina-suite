@@ -235,9 +235,25 @@ async def n10_schema():
     print("[N10] 配置面板 8 个 motivation_* 键齐备，默认关闭 OK")
 
 
+async def n11_shared_scope():
+    """跨会话共享作用域：QQ 与语音通道共用同一份话题/学习进度（默认关闭时各一份）。"""
+    QQ = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
+    PHONE = "webchat_phone!alice!main"
+    core = make_core(shared_scope_enabled=True, shared_scope_id="alice")
+    assert core._sid(QQ) == core._sid(PHONE) == "shared_alice"
+    await core.observe_user(QQ, "我下个月要去日本看枫叶，顺便想买台相机")
+    await core.observe_user(PHONE, "相机的事我还没定下来")
+    st = core._load()
+    assert list(st["sessions"].keys()) == ["shared_alice"], st["sessions"].keys()
+    assert len(st["sessions"]["shared_alice"]["topics"]) >= 1
+    off = make_core()
+    assert off._sid(QQ) != off._sid(PHONE)
+    print("[N11] 共享作用域：语音与 QQ 同一份话题；关闭时按会话隔离 OK")
+
+
 async def main():
     for fn in [n1_disabled, n2_observe_topics, n3_learning_progress, n4_affect_gate,
-               n5_reweight, n6_select, n7_persist, n8_status_and_cap, n9_wiring, n10_schema]:
+               n5_reweight, n6_select, n7_persist, n8_status_and_cap, n9_wiring, n10_schema, n11_shared_scope]:
         await fn()
     print("阶段四（动机与注意力）测试全部通过")
 
