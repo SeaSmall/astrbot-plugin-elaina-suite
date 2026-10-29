@@ -537,9 +537,8 @@ async def main():
     assert calls == {"image": 1, "md": 1, "text": 1}, calls
     print("[17] 日报政府官网政策源 + 图片/md 两份都给 OK")
 
-    # 18) 记忆库 + 子代理流水线（v1.1.1：与独立版 proactive-guard v1.1.0 对齐）
+    # 18) 记忆源归一（阶段二）：全插件只有 Mem0 一个记忆源
     pg = pl.proactive_guard
-    # 测试桩的 KV 是 no-op，这里换成内存字典，便于验证记忆落库与读取
     _kv = {}
 
     async def _kv_get(key, default=None):
@@ -550,69 +549,99 @@ async def main():
 
     pg.get_kv_data = _kv_get
     pg.put_kv_data = _kv_put
-    assert mod.MEMORY_KEY == "memory_store"
-    assert "{memory}" in mod.MEMORY_BLOCK_TEMPLATE
-    assert "{max_chars}" in mod.MEMORY_PROMPT and "{old}" in mod.MEMORY_PROMPT
-    for _c in (mod.PLANNER_PROMPT, mod.WRITER_PROMPT, mod.REVIEWER_PROMPT):
-        assert "{persona}" in _c, _c[:40]
-    # 18a) 配置键齐全（9 个新键）
+
+    class _FakeMemEngine:
+        """冒充 LivingMemoryCore：只暴露归一后允许存在的接口。"""
+
+        def __init__(self):
+            self.enabled = True
+            self.items = [
+                {"memory": "用户叫小鱼，正在做 AstrBot 插件", "metadata": {"kind": "chat"}},
+                {"memory": "魔法协会总部在旧都", "metadata": {"kind": "worldview"},
+                 "created_at": "2026-10-01 03:00:00"},
+            ]
+            self.wm = "2026-10-20 03:00"
+            self.flushed = 0
+            self.resets = 0
+            self.seeds = 0
+
+        def scope_id(self):
+            return "u_owner"
+
+        async def memory_text(self, chars=0):
+            return "\n".join("- " + i["memory"] for i in self.items)
+
+        async def list_memories(self, top_k=200):
+            return list(self.items)
+
+        async def flush_now(self):
+            self.flushed += 1
+            return 3
+
+        async def reset_scope(self):
+            self.resets += 1
+            n = len(self.items)
+            self.items = []
+            return n
+
+        async def seed_worldview(self):
+            self.seeds += 1
+            return 34
+
+        def watermark(self):
+            return self.wm
+
+        async def close(self):
+            return None
+
+    _mem = _FakeMemEngine()
+    pl.living_memory = _mem
+
+    # 18a) 旧 KV 记忆链路的配置键/常量必须已删除，只留 mem0_* 一套
     _schema_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"
     )
     _schema = json.load(open(_schema_path, encoding="utf-8"))
     for _k in ("memory_enabled", "memory_cron", "memory_turns", "memory_max_chars",
-               "memory_raw_fallback", "subagent_enabled", "subagent_parallel",
-               "subagent_concurrency", "subagent_review"):
-        assert _k in _schema, f"配置缺键 {_k}"
-    assert "【记忆】" in _schema["memory_enabled"]["description"]
+               "memory_raw_fallback", "memory_notes_enabled", "memory_refresh_cool",
+               "memory_refresh_cooldown", "memory_refresh_before_gen"):
+        assert _k not in _schema, f"旧记忆配置键仍在：{_k}"
+    assert "mem0_migrate_legacy" in _schema, "缺少旧 scope 合并开关"
+    for _n in ("MEMORY_KEY", "MEMORY_BLOCK_TEMPLATE", "MEMORY_PROMPT", "MEMORY_MERGE_PROMPT"):
+        assert not hasattr(mod, _n), f"旧记忆常量仍在：{_n}"
 
-    class _Conv:
-        def __init__(self, h):
-            self.history = h
+    # 18b) 记忆文本与水位都只从 Mem0 取
+    _mem_text = await pg._collect_memory()
+    assert "小鱼" in _mem_text, _mem_text
+    assert await pg._memory_updated() == "2026-10-20 03:00"
+    _mem.wm = ""
+    assert await pg._memory_updated() == ""
 
-    class _CM:
-        async def get_curr_conversation_id(self, umo):
-            return "cid1"
+    class _Ev:
+        def plain_result(self, text):
+            return text
 
-        async def get_conversation(self, umo, cid):
-            return _Conv(json.dumps([
-                {"role": "user", "content": "我叫小鱼，正在做 AstrBot 插件"},
-                {"role": "assistant", "content": [
-                    {"type": "text", "text": "好的，记下了"},
-                    {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
-                ]},
-            ], ensure_ascii=False))
-
-    _cm = _CM()
-    ctx.conversation_manager = _cm
-    # 18b) _history_lines：多模态只抽文本
-    _lines = await pg._history_lines(_cm, "umo1", 20)
-    assert any("小鱼" in x for x in _lines), _lines
-    assert any("好的" in x for x in _lines), _lines
-    assert not any("y.png" in x for x in _lines), _lines
-
-    async def _targets():
-        return ["umo1"]
-
-    pg._collect_target_sessions = _targets
-    _seen = {}
-
-    async def _mem_chat(prompt):
-        _seen["mem_prompt"] = prompt
-        return "用户叫小鱼，正在做 AstrBot 插件。"
-
-    pg._llm_chat = _mem_chat
-    _out = await pg.refresh_memory()
-    assert "小鱼" in _out, _out
-    assert "（暂无）" in _seen["mem_prompt"], "首次总结应显示「暂无」旧摘要"
-    _store = await pg.get_kv_data("memory_store", None)
-    assert _store and _store["items"][0]["umo"] == "umo1", _store
-    # 18c) _collect_memory：生成时能读到
-    _mem = await pg._collect_memory()
-    assert "小鱼" in _mem, _mem
+    # 18c) /记忆 直查 Mem0（世界观条目标 ◆）；/刷新记忆 刷缓冲；/记忆重置 清唯一 scope
+    _got = [r async for r in pg.memory_command(_Ev())]
+    assert "🧠 记忆（共 2 条" in _got[0] and "u_owner" in _got[0], _got
+    assert "◆ 魔法协会总部在旧都" in _got[0], _got
+    _got2 = [r async for r in pg.refresh_memory_command(_Ev())]
+    assert "已写入 Mem0 3 条" in _got2[0] and _mem.flushed == 1, _got2
+    _got3 = [r async for r in pg.reset_memory_command(_Ev())]
+    assert "删除 2 条" in _got3[0] and _mem.resets == 1 and _mem.seeds == 1, _got3
+    _mem.enabled = False
+    _got4 = [r async for r in pg.memory_command(_Ev())]
+    assert "没有初始化成功" in _got4[0], _got4
+    _mem.enabled = True
+    _mem.items = [
+        {"memory": "用户叫小鱼，正在做 AstrBot 插件", "metadata": {"kind": "chat"}},
+        {"memory": "魔法协会总部在旧都", "metadata": {"kind": "worldview"},
+         "created_at": "2026-10-01 03:00:00"},
+    ]
 
     # 18d) _generate_and_store：记忆进子代理 + 规划失败时真的回退单次调用
     pg._random_times = lambda n: ["07:35"]
+    _seen = {}
 
     async def _subagents_fail(date, times, time_list, count, persona, memory_block, **kw):
         _seen["sub_block"] = memory_block
@@ -639,26 +668,9 @@ async def main():
     _seen.pop("gen_prompt", None)
     await pg._generate_and_store("2099-01-02")
     assert "gen_prompt" not in _seen, "子代理成功却又走了单次调用"
+    print("[18] 记忆源归一（Mem0 唯一源 / 命令直查 / 子代理带记忆）OK")
 
-    class _Ev:
-        def plain_result(self, text):
-            return text
 
-    # 18e) /记忆 与 /刷新记忆
-    _got = [r async for r in pg.memory_command(_Ev())]
-    assert "🧠 记忆库" in _got[0] and "小鱼" in _got[0], _got
-    pl.config["memory_enabled"] = False
-    _got2 = [r async for r in pg.memory_command(_Ev())]
-    assert "memory_enabled = false" in _got2[0], _got2
-    _got3 = [r async for r in pg.refresh_memory_command(_Ev())]
-    assert "memory_enabled" in _got3[0], _got3
-    assert await pg.refresh_memory() == "", "关闭记忆后不应写入"
-    pl.config["memory_enabled"] = True
-    # 18f) _truncate_memory 上限
-    _long = "\n".join(f"第{i}行的记忆内容" for i in range(400))
-    _cut = pg._truncate_memory(_long)
-    assert len(_cut) < len(_long), (len(_cut), len(_long))
-    print("[18] 记忆库 + 子代理流水线（含回退单次生成）OK")
 
     # [19] 本周真机缺陷回归：渲染结果分流 / 宽松解析 / 国际源
     # 19a) _image_chain：本地路径（AstrBot 网络渲染失败时会返回容器内文件路径）
@@ -710,64 +722,7 @@ async def main():
     assert any("chinanews" in u for u in mod.DEFAULT_FEEDS["feeds_intl"])
     print("[19] 渲染结果分流 + 宽松解析 + 国际源修复 OK")
 
-    # [20] 记忆质量 + 日报重复发送防护（2026-10-17 真机投诉回归）
-    # 20a) 助手自述行必须被丢掉；跨行重复只留一条
-    _raw = "\n".join(
-        [
-            "助手自称魔女，语气温柔",
-            "AI 会提醒用户喝水",
-            "你会给用户做饭",
-            "用户喜欢吃辣。",
-            "用户喜欢吃辣",
-            "用户的妹妹在读高三",
-        ]
-    )
-    _kept = pg._filter_memory_lines(_raw)
-    assert "助手" not in _kept, _kept
-    assert "AI" not in _kept, _kept
-    assert "做饭" not in _kept, _kept
-    assert _kept.count("喜欢吃辣") == 1, _kept
-    assert "妹妹在读高三" in _kept, _kept
-
-    # 20b) _memory_text 优先 merged；无 merged 时跨会话去重
-    _st = {
-        "items": [
-            {"umo": "a", "summary": "用户喜欢吃辣"},
-            {"umo": "b", "summary": "用户喜欢吃辣"},
-        ],
-        "merged": "用户喜欢吃辣",
-    }
-    assert pg._memory_text(_st) == "用户喜欢吃辣", pg._memory_text(_st)
-    _st2 = dict(_st, merged="")
-    _t2 = pg._memory_text(_st2)
-    assert _t2.count("喜欢吃辣") == 1, _t2
-
-    # 20c) 多会话时 refresh_memory 会调合并代理，合并结果已过滤 + 去重
-    async def _two_sessions():
-        return ["umo1", "umo2"]
-
-    async def _hl(cm, umo, turns, window_hours=None):
-        return ["用户：我妹妹在读高三", "你：记下了"]
-
-    _mem_calls = []
-
-    async def _llm_mem(prompt):
-        if "合并成" in prompt:
-            _mem_calls.append("merge")
-            return "助手自称魔女\n用户妹妹在读高三\n用户妹妹在读高三。"
-        _mem_calls.append("per")
-        return "用户妹妹在读高三"
-
-    pg._collect_target_sessions = _two_sessions
-    pg._history_lines = _hl
-    pg._llm_chat = _llm_mem
-    _out2 = await pg.refresh_memory()
-    assert "merge" in _mem_calls, _mem_calls
-    assert "助手" not in _out2, _out2
-    assert _out2.count("妹妹在读高三") == 1, _out2
-    _st3 = await pg._load_memory_store()
-    assert _st3.get("merged"), _st3
-
+    # [20] 日报重复发送防护（2026-10-17 真机投诉回归）
     # 20d) 日报：08:00 定时任务与 5 分钟兜底检查并发触发，只能发一次
     _dd_kv = {}
 
@@ -780,6 +735,9 @@ async def main():
     dd.get_kv_data = _dd_get
     dd.put_kv_data = _dd_put
     dd._now_local = lambda: datetime.datetime(2026, 10, 17, 9, 0)
+    async def _two_sessions():
+        return ["umo1", "umo2"]
+
     dd._collect_target_sessions = _two_sessions
     _runs = []
 
@@ -805,113 +763,21 @@ async def main():
     _runs.clear()
     await dd._maybe_send_digest()
     assert len(_runs) == 1, "失败后应能重新补发"
-    print("[20] 记忆质量（去 AI 自述/跨会话合并）+ 日报防重复发送 OK")
+    print("[20] 日报防重复发送（占位/回滚/补发）OK")
 
-    # [21] 记忆四项真机病因回归（2026-10-19）
-    # 21a) 历史行带时间戳、剥掉 system_reminder、按时间窗过滤（而不是只数条数）
-    _now = datetime.datetime.now()
+    # [21] 旧记忆链路确认已物理移除（阶段二收尾回归）
+    for _dead in ("_history_lines", "_collect_user_notes", "_memory_refresh_due",
+                  "_load_memory_store", "_memory_text", "_truncate_memory",
+                  "_filter_memory_lines", "_collect_raw_history", "_workspaces_dir",
+                  "refresh_memory", "_on_memory_time"):
+        assert not hasattr(mod.ProactiveGuardCore, _dead), f"旧记忆方法仍在：{_dead}"
+    # /记忆重置 不再走 KV，直接清 Mem0 唯一 scope
+    _mem.items = [{"memory": "x", "metadata": {}}]
+    _msgs = [r async for r in pg.reset_memory_command(_Ev())]
+    assert _msgs and "删除 1 条" in _msgs[0], _msgs
+    assert _mem.resets == 2 and _mem.items == [], (_mem.resets, _mem.items)
+    print("[21] 旧 KV 记忆链路（历史行/用户笔记/冷却刷新/KV 重置）已物理移除 OK")
 
-    def _rem(ts):
-        return (
-            f"<system_reminder>Current datetime: {ts} (CST), "
-            "Weekday: Tuesday</system_reminder>"
-        )
-
-    _hist = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "万事达卡还没去领"
-                    + _rem((_now - datetime.timedelta(days=6)).strftime("%Y-%m-%d %H:%M")),
-                }
-            ],
-        },
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "think", "think": "思考内容不该出现"},
-                {"type": "text", "text": "记得去领"},
-            ],
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "领过了"
-                    + _rem((_now - datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")),
-                }
-            ],
-        },
-    ]
-
-    class _FakeCM:
-        async def get_curr_conversation_id(self, umo):
-            return "c1"
-
-        async def get_conversation(self, umo, cid):
-            class _C:
-                history = json.dumps(_hist)
-
-            return _C()
-
-    _lines_all = await type(pg)._history_lines(pg, _FakeCM(), "umo", 20, None)
-    assert "system_reminder" not in "".join(_lines_all), _lines_all
-    assert "思考内容不该出现" not in "".join(_lines_all), _lines_all
-    assert _lines_all[-1].startswith("["), _lines_all[-1]
-    assert "领过了" in _lines_all[-1], _lines_all[-1]
-    _lines_win = await type(pg)._history_lines(pg, _FakeCM(), "umo", 20, 24)
-    assert not any("还没去领" in x for x in _lines_win), _lines_win
-    assert any("领过了" in x for x in _lines_win), _lines_win
-
-    # 21b) 工作区 user_profile.md 会被读进记忆（用户手写事实优先）
-    _tmp = tempfile.mkdtemp()
-    _ws = os.path.join(_tmp, "ws1")
-    os.makedirs(_ws)
-    with open(os.path.join(_ws, "user_profile.md"), "w", encoding="utf-8") as _f:
-        _f.write("# 用户档案\n- 万事达卡 2026-10-17 在城里已领\n- 不吃辣\n")
-    _orig_ws, _orig_int, _orig_bool = pg._workspaces_dir, pg._cfg_int, pg._cfg_bool
-    pg._workspaces_dir = lambda: mod.Path(_tmp)
-    pg._cfg_int = lambda k, d=0: d
-    pg._cfg_bool = lambda k, d=True: d
-    _notes = await pg._collect_user_notes()
-    assert "已领" in _notes and "不吃辣" in _notes, _notes
-    assert "用户笔记" in _notes, _notes
-
-    # 21c) 记忆刷新冷却：刚刷过不再刷，过期才刷
-    assert await pg._memory_refresh_due({"updated": ""}) is True
-    _recent = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    assert await pg._memory_refresh_due({"updated": _recent}) is False
-    _old = (datetime.datetime.now() - datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M")
-    assert await pg._memory_refresh_due({"updated": _old}) is True
-
-    # 21d) _collect_memory 把用户笔记拼在最前面（AI 摘要不会盖掉它）
-    _kv["memory_store"] = {
-        "updated": _recent,
-        "items": [{"umo": "u", "summary": "用户妹妹在读高三"}],
-        "merged": "用户妹妹在读高三",
-    }
-    _mem = await pg._collect_memory()
-    assert "用户笔记" in _mem, _mem
-    assert _mem.index("已领") < _mem.index("妹妹在读高三"), _mem
-
-    # 21e) /记忆重置 走 KV 写空（不能直接改 sqlite，会被内存副本盖回）
-    class _Ev:
-        def plain_result(self, t):
-            return t
-
-    async def _drain():
-        return [r async for r in pg.reset_memory_command(_Ev())]
-
-    _msgs = await _drain()
-    assert _msgs, _msgs
-    assert _kv["memory_store"]["items"] == [], _kv["memory_store"]
-    assert not _kv["memory_store"].get("merged"), _kv["memory_store"]
-
-    pg._workspaces_dir, pg._cfg_int, pg._cfg_bool = _orig_ws, _orig_int, _orig_bool
-    print("[21] 记忆四项病因（时间窗/用户笔记/冷却刷新/重置走KV）OK")
 
     # [22] 计划与记忆的时间错位（2026-10-20）
     # 症状：记忆 03:00 已写「卡已领」，今天的计划是昨天用旧记忆预生成的，
@@ -919,8 +785,7 @@ async def main():
     _today = datetime.datetime.now().strftime("%Y-%m-%d")
     _now_hhmm = datetime.datetime.now().strftime("%H:%M")
     _schema = json.load(open(_schema_path, encoding="utf-8"))
-    for _k in ("memory_refresh_before_gen", "dispatch_fact_check",
-               "dispatch_regenerate_on_memory_change"):
+    for _k in ("dispatch_fact_check", "dispatch_regenerate_on_memory_change"):
         assert _k in _schema, f"配置缺键 {_k}"
     assert _schema["gen_time"]["default"] == "20 3 * * *", _schema["gen_time"]
     assert "{message}" in mod.FACT_CHECK_PROMPT and "{memory}" in mod.FACT_CHECK_PROMPT
@@ -928,12 +793,11 @@ async def main():
     _saved = {}
     for _n in ("_cfg_bool", "_cfg_int", "_llm_chat", "_collect_memory",
                "_collect_target_sessions", "_send_silent", "_generate_with_subagents",
-               "refresh_memory", "_ensure_schedule", "_regenerate_today_if_stale"):
+               "_ensure_schedule", "_regenerate_today_if_stale"):
         _saved[_n] = getattr(pg, _n)
     _flags = {
         "pg_enabled": True,
         "memory_enabled": True,
-        "memory_refresh_before_gen": True,
         "dispatch_fact_check": True,
         "dispatch_regenerate_on_memory_change": True,
         "subagent_enabled": False,
@@ -960,7 +824,7 @@ async def main():
         return "用户笔记：万事达卡已于 2026-10-17 在城里领回。"
 
     # 22a) 生成时把「基于哪一版记忆」写进计划（水位）
-    _kv["memory_store"] = {"updated": "2026-10-20 03:00", "items": [], "merged": ""}
+    _mem.wm = "2026-10-20 03:00"
     pg._collect_memory = _mem_empty
 
     async def _gen_one(prompt):
@@ -972,7 +836,7 @@ async def main():
     assert [i["time"] for i in _kv["daily_plan"]["items"]] == ["08:00"]
 
     # 22b) 记忆比计划新 => 发送前拿最新记忆校验，冲突则改写
-    _kv["memory_store"]["updated"] = "2026-10-20 12:00"
+    _mem.wm = "2026-10-20 12:00"
     _kv["daily_plan"] = {
         "date": _today,
         "memory_updated": "2026-10-20 03:00",
@@ -1039,7 +903,7 @@ async def main():
     assert _sent == ["军训累不累"], _sent
 
     # 22e) 今日计划基于旧记忆 => 重建「还没到点」的条目，时间点保持不变
-    _kv["memory_store"]["updated"] = "2026-10-20 12:00"
+    _mem.wm = "2026-10-20 12:00"
     _kv["daily_plan"] = {
         "date": _today,
         "memory_updated": "2026-10-20 03:00",
@@ -1056,12 +920,8 @@ async def main():
     assert _kv["daily_plan"]["items"][0]["time"] == "23:59", _kv["daily_plan"]
     assert _kv["daily_plan"]["memory_updated"] == "2026-10-20 12:00"
 
-    # 22f) 生成时点顺序：先刷记忆 -> 再确保槽位 -> 最后重建今日残留
+    # 22f) 生成时点顺序：先确保槽位 -> 最后重建今日残留（不再有「生成前刷记忆」）
     _order = []
-
-    async def _rf():
-        _order.append("refresh")
-        return ""
 
     async def _ens(force=False):
         _order.append("ensure")
@@ -1069,11 +929,10 @@ async def main():
     async def _reg():
         _order.append("regen")
 
-    pg.refresh_memory = _rf
     pg._ensure_schedule = _ens
     pg._regenerate_today_if_stale = _reg
     await pg._on_gen_time()
-    assert _order == ["refresh", "ensure", "regen"], _order
+    assert _order == ["ensure", "regen"], _order
 
     for _n, _v in _saved.items():
         setattr(pg, _n, _v)

@@ -24,7 +24,8 @@ spec.loader.exec_module(mod)
 
 TMP = tempfile.mkdtemp(prefix="affect_test_")
 mod._plugin_data_dir = lambda: TMP
-STATE = os.path.join(TMP, "affect_state.json")
+STATE = os.path.join(TMP, "global_affect.json")
+LEGACY = os.path.join(TMP, "affect_state.json")
 
 
 class FakeGuard:
@@ -69,7 +70,7 @@ UMO = "aiocqhttp:Friend:10001"
 def make_core(**overrides):
     cfg = dict(BASE)
     cfg.update(overrides)
-    for p in (STATE, STATE + ".part"):
+    for p in (STATE, STATE + ".part", LEGACY, LEGACY + ".migrated"):
         if os.path.exists(p):
             os.remove(p)
     return mod.AffectCore(FakeOwner(cfg))
@@ -190,7 +191,8 @@ async def a8_persist():
     assert os.path.exists(STATE), "状态文件未落盘"
     with open(STATE, encoding="utf-8") as f:
         raw = json.load(f)
-    assert raw["sessions"][core._sid(UMO)]["pad"]["p"] == 0.42
+    assert "sessions" not in raw, "全局单例文件里不能再有 sessions 分区"
+    assert raw["pad"]["p"] == 0.42, raw
     core2 = mod.AffectCore(FakeOwner(dict(BASE)))  # 不清状态，模拟重启后新实例
     got = core2.get_state(UMO)["pad"]
     assert abs(got["p"] - 0.42) < 1e-6, got
@@ -219,13 +221,13 @@ async def a10_schema():
             "affect_silence_threshold_minutes", "affect_silence_check_minutes",
             "affect_silence_cooldown_minutes", "affect_silence_target",
             "affect_reflect_poignancy", "affect_slow_delta_cap", "affect_inject_chars",
-            "affect_baseline"]
+            "affect_baseline", "affect_primary_user_id"]
     for k in keys:
         assert k in raw, "缺少配置键 " + k
     assert raw["affect_enabled"]["default"] is False, "默认必须关闭（不改变现有行为）"
     assert int(raw["affect_decay_half_life_minutes"]["default"]) == 120
     assert int(raw["affect_reflect_poignancy"]["default"]) == 150
-    print("[A10] 11 个 affect_* 配置键齐全且默认关闭 OK")
+    print("[A10] 12 个 affect_* 配置键齐全且默认关闭 OK")
 
 
 async def a11_json_objects():
@@ -306,25 +308,26 @@ async def a14_core_enabled_helper():
     print("[A14] _core_enabled 兼容 enabled()/_on()/异常，且四处调用点已统一 OK")
 
 
-async def a15_shared_scope():
-    """跨会话共享作用域：QQ 与语音通道共用同一份 PAD（默认关闭时各一份）。"""
+async def a15_global_single():
+    """阶段七：情感状态全局唯一，不再有按会话/用户的分区。"""
     QQ = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
     PHONE = "webchat_phone!alice!main"
-    shared = make_core(shared_scope_enabled=True, shared_scope_id="alice")
-    assert shared._sid(QQ) == shared._sid(PHONE) == "shared_alice"
-    await shared.fast_update(QQ, "你真是太厉害了，好棒，太强了", "哼，这不是当然的吗")
-    st = shared.get_state(PHONE)
-    assert abs(st["pad"]["p"] - 0.15) > 0.02, st["pad"]
-    iso = make_core()
-    assert iso._sid(QQ) != iso._sid(PHONE)
-    print("[A15] 共享作用域：语音与 QQ 同一份 PAD；关闭时按会话隔离 OK")
+    core = make_core()
+    assert not hasattr(core, "_sid"), "全局单例后不应再持有 _sid 分区函数"
+    await core.fast_update(QQ, "你真是太厉害了，好棒，太强了", "哼，这不是当然的吗")
+    st_a = core.get_state(QQ)
+    st_b = core.get_state(PHONE)
+    for k in ("p", "a", "d"):
+        assert abs(st_a["pad"][k] - st_b["pad"][k]) < 1e-3, "同一份 PAD 必须在两个会话间一致"
+    assert abs(st_b["pad"]["p"] - 0.15) > 0.02, st_b["pad"]
+    print("[A15] 全局单例：语音与 QQ 读到同一份 PAD（已无 _sid 分区） OK")
 
 
 async def main():
     for fn in [a1_decay_half_life, a2_disabled, a3_fast_channel, a4_slow_reflect,
                a5_silence_channel, a6_silence_decay_target, a7_describe, a8_persist,
                a9_wiring, a10_schema, a11_json_objects, a12_baseline,
-               a13_downstream_coupling, a14_core_enabled_helper, a15_shared_scope]:
+               a13_downstream_coupling, a14_core_enabled_helper, a15_global_single]:
         await fn()
     print("阶段三（情感状态）测试全部通过")
 

@@ -64,6 +64,15 @@ class FakeMemory:
         self.calls.append(("get_all", kw))
         return {"results": list(self.all_items)}
 
+    def delete_all(self, **kw):
+        self.calls.append(("delete_all", {}, kw))
+        return {"message": "deleted"}
+
+    def delete(self, memory_id, **kw):
+        self.calls.append(("delete", memory_id, kw))
+        self.all_items = [i for i in self.all_items if i.get("id") != memory_id]
+        return {"message": "deleted"}
+
 
 def install_fake_mem0():
     fake = types.ModuleType("mem0")
@@ -147,7 +156,10 @@ async def m3_search_contract():
     assert len(hits) == 1 and "布丁" in hits[0]["memory"]
     kind, query, kw = mem.calls[-1]
     assert kind == "search" and query == "布丁是谁"
-    assert kw.get("filters") == {"user_id": "u_aiocqhttp_Friend_1"}, kw
+    assert kw.get("filters") == {"user_id": "u_owner"}, kw
+    # 不论从哪个会话发起，永远只查唯一 scope
+    await e.search("布丁是谁", "webchat_phone!alice!main")
+    assert mem.calls[-1][2]["filters"]["user_id"] == "u_owner"
     assert "user_id" not in kw, "顶层 user_id 会被 mem0 拒绝"
     assert kw.get("top_k") == 4
     assert abs(float(kw.get("threshold")) - 0.5) < 1e-9, kw
@@ -177,7 +189,8 @@ async def m5_seed_idempotent():
         added = await e.seed_worldview()
         assert added == 1, added
         add_calls = [c for c in mem.calls if c[0] == "add"]
-        assert add_calls and add_calls[0][2].get("user_id") == "elaina_world"
+        assert add_calls and add_calls[0][2].get("user_id") == "u_owner"
+        assert add_calls[0][2].get("metadata", {}).get("kind") == "worldview"
         assert add_calls[0][2].get("infer") is False
         ga = [c for c in mem.calls if c[0] == "get_all"]
         assert ga and int(ga[0][1].get("top_k") or 0) >= 1000, ga
@@ -303,31 +316,120 @@ async def m13_affect_wiring():
 
 
 
-async def m14_shared_scope():
-    """跨会话共享作用域：语音通道与 QQ 共用同一个 mem0 user_id（默认关闭时按会话隔离）。"""
+async def m14_single_scope():
+    """记忆源归一：不管会话、不管共享开关，全插件只有一个 mem0 scope。"""
     qq = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
     phone = "webchat_phone!alice!main"
-    on = make_engine(shared_scope_enabled=True, shared_scope_id="alice")
-    assert on._uid(qq) == on._uid(phone) == "u_shared_alice", (on._uid(qq), on._uid(phone))
-    await on.search("布丁", qq)
-    await on.search("布丁", phone)
+    e = make_engine(shared_scope_enabled=True, shared_scope_id="alice")
+    assert e._uid(qq) == e._uid(phone) == e._uid("") == "u_alice", e._uid("")
+    assert e.scope_id() == "u_alice"
+    await e.search("布丁", qq)
+    await e.search("布丁", phone)
     calls = [c for c in FakeMemory.instances[0].calls if c[0] == "search"]
-    assert calls[0][2]["filters"]["user_id"] == "u_shared_alice"
-    assert calls[1][2]["filters"]["user_id"] == "u_shared_alice"
+    assert {c[2]["filters"]["user_id"] for c in calls} == {"u_alice"}
+    # 关闭共享开关也仍然只有一个 scope（回退 owner），不再按会话隔离
     off = make_engine()
-    assert off._uid(qq) != off._uid(phone), "关闭时必须按会话隔离"
+    assert off._uid(qq) == off._uid(phone) == "u_owner"
     blank = make_engine(shared_scope_enabled=True, shared_scope_id="  ")
-    assert blank._uid(qq) == "u_shared_shared"
+    assert blank._uid(qq) == "u_shared"
     bad = make_engine(shared_scope_enabled=True, shared_scope_id="家/里 NAS")
-    assert bad._uid(qq) == "u_shared_NAS", bad._uid(qq)
-    print("[M14] 共享作用域：跨通道同一 user_id / 关闭时隔离 / 空值回退 shared OK")
+    assert bad._uid(qq) == "u_NAS", bad._uid(qq)
+    print("[M14] 记忆源归一：任何会话/开关组合下都只有一个 scope OK")
+
+
+async def m15_watermark_and_migration():
+    """水位来自 Mem0 写入、旧 scope 合并进唯一 scope、重置只清唯一 scope。"""
+    e = make_engine()
+    e._meta_save({})
+    mem = await e._ensure()
+    assert e.watermark() == "", e.watermark()
+    await e.on_user_message(ev(text="第一句"))
+    await e.on_llm_response(ev(), resp("第一回"))
+    await e.on_user_message(ev(text="第二句"))
+    await e.on_llm_response(ev(), resp("第二回"))
+    await flush_tasks(e)
+    wm = e.watermark()
+    assert wm.startswith("20"), ("写入后必须有水位", wm)
+    assert e.status()["watermark"] == wm
+    # 旧 scope 合并
+    mem.all_items = [
+        {"memory": "旧QQ记忆", "user_id": "u_default_x"},
+        {"memory": "旧语音记忆", "user_id": "u_webchat_phone"},
+        {"memory": "世界观", "user_id": "elaina_world"},
+        {"memory": "已在本 scope", "user_id": "u_owner"},
+    ]
+    mem.calls = []
+    merged = await e.migrate_scopes()
+    assert merged == 3, merged
+    adds = [c for c in mem.calls if c[0] == "add"]
+    assert all(c[2]["user_id"] == "u_owner" for c in adds), adds
+    assert all(c[2]["infer"] is False for c in adds)
+    deleted = [c[2].get("user_id") for c in mem.calls if c[0] == "delete_all"]
+    assert set(deleted) == {"u_default_x", "u_webchat_phone", "elaina_world"}, deleted
+    assert "u_owner" not in deleted
+    # 重置：只清唯一 scope
+    mem.calls = []
+    n = await e.reset_scope()
+    assert n == 4, n
+    da = [c for c in mem.calls if c[0] == "delete_all"]
+    assert da and da[-1][2]["user_id"] == "u_owner"
+    print("[M15] 水位=Mem0 写入时间；旧 scope 合并；重置只清唯一 scope OK")
+
+
+async def m16_memory_command_reads_mem0():
+    """`/记忆` 直查 Mem0；旧 KV / 用户笔记 / 裸历史三条链路必须已删除。"""
+    src = io.open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    for dead in ("memory_store", "_load_memory_store", "async def refresh_memory(",
+                 "MEMORY_KEY", "_collect_user_notes", "_collect_raw_history",
+                 "memory_cron", "MEMORY_MERGE_PROMPT", "_on_memory_time",
+                 "MEMORY_BLOCK_TEMPLATE"):
+        assert dead not in src, "旧记忆链路仍残留：" + dead
+    assert "await engine.list_memories(" in src or "engine.list_memories(" in src
+    assert "engine.flush_now()" in src and "engine.reset_scope()" in src
+    assert "def memory_text(" in src and "def watermark(" in src
+    # 命令层判的是 engine.enabled，真实引擎必须带这个属性（曾漏掉 → /记忆 直接报错）
+    on = make_engine()
+    off = make_engine(mem0_enabled=False)
+    assert on.enabled is True, "真实引擎缺少 enabled 属性，/记忆 会 AttributeError"
+    assert off.enabled is False
+    print("[M16] /记忆 直查 Mem0，旧 KV/笔记/裸历史链路已彻底移除 OK")
+
+
+async def m17_warmup_order_and_dedupe():
+    """启动顺序（先合并再播种）与重复条目清理。"""
+    src = io.open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    body = src[src.index("async def _warmup(self)"):]
+    body = body[:body.index("async def ", 10)]
+    assert body.index("await self.migrate_scopes()") < body.index("await self.seed_worldview()"), \
+        "必须先合并旧 scope 再补种子，否则世界观事实会写两遍"
+    assert body.index("await self.dedupe_scope()") > body.index("await self.seed_worldview()")
+    e = make_engine()
+    mem = await e._ensure()
+    mem.all_items = [
+        {"id": "m1", "memory": "魔法协会总部在旧都", "user_id": "u_owner"},
+        {"id": "m2", "memory": "魔法协会总部在旧都", "user_id": "u_owner"},
+        {"id": "m3", "memory": "布丁很好吃", "user_id": "u_owner"},
+    ]
+    mem.calls = []
+    removed = await e.dedupe_scope()
+    assert removed == 1, removed
+    dels = [c for c in mem.calls if c[0] == "delete"]
+    assert [c[1] for c in dels] == ["m2"], dels
+    assert [i["id"] for i in mem.all_items] == ["m1", "m3"]
+    # 没有重复时不删任何东西，也不报错
+    mem.calls = []
+    assert await e.dedupe_scope() == 0
+    assert not [c for c in mem.calls if c[0] == "delete"]
+    print("[M17] 启动顺序先迁后种；重复条目按文本去重，无重复时空转 OK")
 
 
 async def main():
     for fn in [m1_disabled, m2_singleton, m3_search_contract, m4_recall_block,
                m5_seed_idempotent, m6_buffered_write, m7_failure_degrade, m8_close, m9_wiring,
                m10_seed_sees_all_beyond_default_limit, m11_affect_rerank,
-               m12_affect_recall_switch, m13_affect_wiring, m14_shared_scope]:
+               m12_affect_recall_switch, m13_affect_wiring, m14_single_scope,
+               m15_watermark_and_migration, m16_memory_command_reads_mem0,
+               m17_warmup_order_and_dedupe]:
         await fn()
     print("阶段二（long-term memory）测试全部通过")
 

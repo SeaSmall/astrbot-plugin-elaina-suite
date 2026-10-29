@@ -338,61 +338,6 @@
     "default": true,
     "description": "【子代理生成】是否启用审校代理（统一语气、去重、修正与时间点不符的内容）。关闭则直接使用写手原稿，少一次 LLM 调用"
   },
-  "memory_enabled": {
-    "type": "bool",
-    "default": true,
-    "description": "【记忆】内置记忆系统：定时让 AI 把近期真实对话总结成「长期记忆要点」存入记忆库，生成主动消息时读出来注入提示词，让 AI 记得用户是谁、在做什么、聊过什么，而不是每天凭空寒暄"
-  },
-  "memory_cron": {
-    "type": "string",
-    "default": "0 3 * * *",
-    "description": "【记忆】记忆总结时间（cron，默认每天 03:00）：把「旧摘要 + 新对话」交给 AI 滚动重写成最新记忆。记忆库为空时，生成每日计划前也会就地总结一次"
-  },
-  "memory_turns": {
-    "type": "int",
-    "default": 20,
-    "description": "【记忆】每次总结时读取的历史消息条数（取最近的 N 条，含用户与 AI 双方）"
-  },
-  "memory_max_chars": {
-    "type": "int",
-    "default": 1500,
-    "description": "【记忆】记忆文本的最大字符数（既是总结输出的字数上限，也是注入提示词时的长度上限，超出保留最近部分）"
-  },
-  "memory_raw_fallback": {
-    "type": "bool",
-    "default": true,
-    "description": "【记忆】记忆库为空且 AI 总结失败时，是否退回注入未总结的原始对话历史（更省事但更杂、更费 token）。关闭则没有记忆就直接空着"
-  },
-  "memory_window_hours": {
-    "type": "int",
-    "default": 48,
-    "description": "【记忆】总结时按时间窗取对话（小时）。0 = 只按 memory_turns 数条数。按时间取能保证「昨天说已经做完的事」一定在窗口内，不会因为消息条数被挤出而让旧待办一直留着"
-  },
-  "memory_refresh_cooldown": {
-    "type": "int",
-    "default": 30,
-    "description": "【记忆】生成主动消息前，若记忆距上次刷新超过这么多分钟就先就地刷新一次（默认 30）。只靠每天 03:00 的话，白天发生的事最多滞后近 24 小时"
-  },
-  "memory_rewrite_stale": {
-    "type": "bool",
-    "default": true,
-    "description": "【记忆】某个会话近期没有新对话时，是否也把它的旧记忆按当前规则重新整理一遍（删掉已完成/已过期条目）。关闭则没新对话的会话旧记忆永远不变"
-  },
-  "memory_notes_enabled": {
-    "type": "bool",
-    "default": true,
-    "description": "【记忆】是否读取 AstrBot 工作区里用户手写的 user_profile.md 并优先注入。这是用户亲手写的事实源，比 AI 滚动摘要可靠，改了立刻生效"
-  },
-  "memory_notes_chars": {
-    "type": "int",
-    "default": 1200,
-    "description": "【记忆】用户笔记（user_profile.md）注入时的字数上限"
-  },
-  "memory_refresh_before_gen": {
-    "type": "bool",
-    "default": true,
-    "description": "【记忆】每天生成计划前先强制刷新一次记忆（不等 30 分钟冷却）。保证「生成计划时用的记忆」是最新的，而不是昨天的"
-  },
   "dispatch_fact_check": {
     "type": "bool",
     "default": true,
@@ -870,5 +815,15 @@
     "type": "bool",
     "description": "[系统健康报告] 是否显示网络接口信息",
     "default": false
+  },
+  "affect_primary_user_id": {
+    "type": "string",
+    "description": "情感决策框里的「主要交互对象」标识，支持用逗号分隔多个（同一个人可能同时出现在 QQ openid 与 webchat 用户名等渠道），沉默评估只针对这些人。留空 = 方案二（全局静默，任意人互动都算在场）",
+    "default": ""
+  },
+  "mem0_migrate_legacy": {
+    "type": "bool",
+    "default": true,
+    "description": "【记忆】启动时把旧版分散在多个 user_id 下的 Mem0 记忆合并进唯一 scope（幂等，可重复跑）"
   }
 }

@@ -682,6 +682,63 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
   `[persona] 已向对话 system prompt 注入插件人格（1140 字）`，回复为傲娇短句（「被说就难受成这样？……过来，先吃饭」）。
 - 配置面板 159 → 161 项。
 
+## v1.10.0（2026-10-29）
+
+### 🫀 情感全局化（阶段一：一个人只有一份心情）
+
+- **状态存储改为全局单例**：`<data>/affect_state.json`（`{"sessions": {<sid>: ...}}`）→
+  `<data>/global_affect.json`（单对象，无任何 session / user 分区键）。
+- **迁移**：首次启动读旧文件，优先取 `shared_<shared_scope_id>`，否则取 `updated` 最大的会话，
+  写成全局状态；旧文件 `os.replace` 为 `.migrated` 留档，日志
+  `[affect] 已迁移旧情感状态为全局单例（来源 …，旧文件共 N 个会话）`。
+- **读写路径全部去分区**：`_sid()` / 按会话的 `_locks` 删除，改成一把全局锁；
+  `_entry()` / `get_state()` / `note_user()` / `silence_severity()` / `describe()` / `status()`
+  均无会话参数（保留可选形参向后兼容）。
+- **衰减与反思**：衰减按「距全局最后一次任意交互」的时间折算；慢通道反思基于全局累积 poignancy。
+- **沉默评估改为全局单次评估**：新增 `affect_primary_user_id`（方案一，推荐）——填了就只认这个人的
+  `last_user_at`，别的会话来聊天只更新 `last_any_at`、不重置沉默计时；留空退化为方案二「全局静默」。
+  该配置支持逗号分隔多个标识（同一个人跨 QQ / webchat 渠道时不必二选一），命中任意一个即算主要对象。
+  日志 `[affect] 沉默评估注入负面事件：全局 偏离度=…（基准=主要对象/全局静默）`。
+- **注入读全局 PAD**：`_living_memory_block` / `_tsundere_encrypt_level` / `_living_compose` /
+  `_affect_context` / 动机竞争读到的都是同一份心情；`/情感状态` 重写为全局展示。
+
+### 🧠 记忆源归一（阶段二：Mem0 是唯一记忆源）
+
+- **删除三套并行记忆里的两套半**：KV `memory_store`（AI 摘要 + 跨会话合并）、
+  `workspaces/*/user_profile.md` 用户笔记、`_collect_raw_history` 裸历史回退、
+  每日 03:00 的 `memory_cron` 总结任务（含 cron_manager / APScheduler / living 调度器三处注册）。
+- **唯一 scope**：`_memory_scope_id(config)` = `shared_scope_id` 或固定 `owner`；`_uid()` 不再按会话派生，
+  全插件只读写这一个 `user_id`（世界观观测也写进同一 scope，`metadata.kind="worldview"`）。
+- **新增单一源接口**：`list_memories()` / `memory_text()` / `flush_now()` / `reset_scope()` /
+  `migrate_scopes()` / `watermark()`，外加 `<data>/mem0_meta.json` 记录 `last_write_at` / `seeded_at` / `writes`。
+- **旧 scope 自动合并**：启动时把散落在其它 `user_id` 下的 Mem0 条目并入唯一 scope（写入带
+  `metadata.migrated_from`，再删旧 scope），日志 `[memory] 旧 scope 已合并：X → u_alice（N 条）`；
+  开关 `mem0_migrate_legacy`（默认开，幂等）。
+- **命令直查 Mem0**：`/记忆` 列出 `list_memories()`（worldview 标 ◆）；`/刷新记忆` → `flush_now()`；
+  `/记忆重置` → `reset_scope()` + 重播世界观。
+- **计划水位改指 Mem0**：`_memory_updated()` = Mem0 最后写入时间，"计划是否基于旧记忆"的判定不再看 KV。
+- **配置瘦身**：删除 `memory_enabled` / `memory_cron` / `memory_turns` / `memory_max_chars` /
+  `memory_raw_fallback` / `memory_window_hours` / `memory_refresh_cooldown` / `memory_rewrite_stale` /
+  `memory_notes_enabled` / `memory_notes_chars` / `memory_refresh_before_gen`（11 项），
+  新增 `mem0_migrate_legacy`；配置面板 164 → 154 项。
+
+### ✅ 测试
+
+- 新增 `tests/test_global.py`（G1–G8）：全局单例结构、跨会话读回、迁移优先级、方案一/方案二、
+  单次沉默评估、无分区残留、钩子传 `sender_id`。
+- `tests/test_memory.py` 重写 M3 / M5 / M14，新增 M15（水位 + 旧 scope 合并 + 重置）与
+  M16（`/记忆` 直查 Mem0、旧链路物理移除）；`tests/test_merged.py` 的 [18] / [20a-c] / [21] / [22]
+  改为「记忆源归一」回归。
+- 全量：merged / living / affect / memory / motivation / tsundere / global 七套全过。
+
+### ⚠️ 升级注意（破坏性变更）
+
+- 旧 `affect_state.json` 会自动迁移并留档 `.migrated`；旧 KV `memory_store` 与
+  `workspaces/*/user_profile.md` **不再被读取**（服务器侧已备份后清理）。
+- 旧的按会话 Mem0 scope（`u_<umo>` / `u_shared_<id>` / `elaina_world`）会在首次启动时合并进唯一 scope，
+  不需要手工迁移；合并后可重跑（幂等）。
+- 若曾用 `/记忆重置` 或手改过 KV，请以 `/记忆` 输出为准（现在它就是 Mem0 的真实内容）。
+
 ## v1.9.0（2026-10-28）
 
 ### 问题

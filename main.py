@@ -317,81 +317,6 @@ REVIEWER_PROMPT = """{persona}{world_block}
 {draft}"""
 
 
-MEMORY_BLOCK_TEMPLATE = """
-近期对话记忆（用户与你的真实聊天片段，按时间从早到晚）：
-{memory}
-（以上只是背景，不要直接复述、不要提及「记忆」「记录」这类词）"""
-
-MEMORY_KEY = "memory_store"
-
-# 用户自己写在 AstrBot 工作区里的笔记（workspaces/<会话>/user_profile.md）。
-# 这份是「事实」而不是「AI 的滚动摘要」：用户改了笔记就该立刻生效。
-MEMORY_NOTES_TEMPLATE = """
-【用户笔记】用户本人写下的事实（优先级高于下面的记忆摘要，两者冲突时以笔记为准）：
-{notes}"""
-
-# AstrBot 会把当前时间塞进用户消息里：
-# <system_reminder>Current datetime: 2026-10-13 20:33 (CST), Weekday: Tuesday</system_reminder>
-# 记忆必须知道「哪句话是哪天说的」，否则旧待办会一直被当成仍然成立。
-_TS_RE = re.compile(r"Current datetime:\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})")
-_SYS_REMINDER_RE = re.compile(r"<system_reminder>.*?</system_reminder>", re.S)
-
-MEMORY_PROMPT = """你是一个记忆整理助手。你的任务是把对话里**关于这位用户这个人**的信息记下来，
-写成一份随时能查的个人档案。
-
-已有记忆（上一轮的总结，可能为空）：
-{old}
-
-用户笔记（用户本人写的，事实优先级最高；与记忆冲突时以它为准）：
-{notes}
-
-新的对话记录（从早到晚，每行前的 [日期 时间] 是这句话说出的时间）：
-{raw}
-
-要记什么（这是重点）：
-1. **发生过的事**：用户做过什么、遇到什么、去了哪、事情进展到哪一步
-2. **爱好与偏好**：喜欢/讨厌什么、口味、习惯、作息、喜欢的表达方式与称呼
-3. **正在做的事**：项目、学业、考试、工作、行程、长期目标，以及各自的进度
-4. **人际关系**：家人、朋友、同学、同事，用户怎么称呼他们、关系如何、发生过什么
-5. **情绪与状态**：最近的心情、身体状态、压力来源
-6. **明确约定**：用户和你说好要做的事、提过的计划
-
-不要记什么：
-- **不要写任何关于你自己（助手）的描述**：你的自称、口头禅、语气、性格、你做过什么、你承诺过什么。
-  你的行为风格由人格设定负责，写进记忆只会和人格设定重复、互相打架
-- 不要记「用户问了你一个问题」「你回答了」这类流水账
-- 不要把「用户这一次让你做什么」当成长期事实（一次性指令不是档案）
-- 不要记一次性琐事；有日期的事可以记但要带日期，超过 7 天的旧安排不再保留
-- 不要编造对话里没出现过的信息
-
-处理旧记忆里「待办 / 未完成 / 计划」这类条目的规则（最容易出错，务必遵守）：
-- 如果新对话里出现了「已经做了 / 领过了 / 办完了」这类说法，立刻删掉对应待办，改成「已…（日期）」
-- 如果用户笔记里已经写了结果，以笔记为准，旧的待办一律删掉
-- 旧待办如果在新对话里完全没被提起，且看不出是长期目标，也删掉——不要假设它仍然成立
-- 宁可少记，也不要把已经过期的事当成正在发生
-
-写法：
-- 第三人称，主语是「用户…」，短句分条，每行一条
-- **同一件事只写一次**；旧记忆与新对话重复的合并成一条，不要两处都留
-- 新旧信息冲突时以新的为准
-- 整份档案不超过 {max_chars} 字；超了先删最不重要、最可能过期的条目
-- 只输出记忆正文，不要标题、不要编号、不要解释你做了什么"""
-
-MEMORY_MERGE_PROMPT = """下面是同一个用户在不同会话里留下的记忆摘要，内容有重复，也可能互相矛盾。
-请把它们合并成**一份**去重后的个人档案。
-
-{items}
-
-合并要求：
-1. 只保留关于**用户这个人**的信息：发生过的事、爱好与偏好、正在做的事、人际关系、情绪状态、明确约定
-2. **删掉所有关于助手（你）自己的描述**：自称、语气、性格、做过什么、承诺过什么——这些由人格设定负责
-3. 同一件事只留一条；不同会话说法冲突时，保留更新、更具体的那条
-4. 有日期的安排保留日期，超过 7 天的旧安排删掉
-5. 第三人称「用户…」，短句分条，每行一条，不超过 {max_chars} 字
-6. 只输出记忆正文，不要标题、不要解释"""
-
-# 记忆里出现这些开头的行 = 在描述助手自己，注入前直接丢掉（兜底，防止模型不听话）
-_MEMORY_SELF_SUBJECTS = ("助手", "ai", "你", "机器人", "bot", "assistant", "模型")
 
 # 发送前的事实复核：计划是提前生成的，记忆却随时可能更新，
 # 于是会出现「记忆里写着卡已领、消息还在提醒去领卡」。这条提示词只做一件事：
@@ -620,6 +545,17 @@ def _shared_scope_id(config) -> str:
     raw = str(config.get("shared_scope_id") or "").strip() or "shared"
     out = re.sub(r"[^0-9A-Za-z_-]+", "_", raw).strip("_")[:40]
     return out or "shared"
+
+
+
+def _memory_scope_id(config) -> str:
+    """记忆的唯一作用域（阶段二）：全插件只读写这一个 user_id。
+
+    AstrBot 被当作「一个人」，记忆不按会话/通道分区。配置了 shared_scope_id
+    就用它（同一个人在 QQ / 语音通道共用一个身份），否则退化成固定 "owner"。
+    """
+    shared = _shared_scope_id(config)
+    return shared or "owner"
 
 
 def _load_plugin_json_asset(rel_path: str) -> dict:
@@ -3209,31 +3145,6 @@ class ProactiveGuardCore(_PluginCoreBase):
                         persistent=False,
                     )
                 self._cron_job_ids.append(getattr(j2, "job_id", None))
-                if self._cfg_bool("memory_enabled", True):
-                    mem_cron = str(
-                        self.config.get("memory_cron") or "0 3 * * *"
-                    ).strip()
-                    try:
-                        j3 = await cm.add_basic_job(
-                            name="proactive_guard_memory",
-                            cron_expression=mem_cron,
-                            handler=self._on_memory_time,
-                            description="把近期对话总结进记忆库（后台静默）",
-                            enabled=True,
-                            persistent=False,
-                            timezone=tz,
-                        )
-                    except TypeError:
-                        j3 = await cm.add_basic_job(
-                            name="proactive_guard_memory",
-                            cron_expression=mem_cron,
-                            handler=self._on_memory_time,
-                            description="把近期对话总结进记忆库（后台静默）",
-                            enabled=True,
-                            persistent=False,
-                        )
-                    self._cron_job_ids.append(getattr(j3, "job_id", None))
-                    logger.info(f"[proactive_guard] 记忆总结任务已注册: {mem_cron}（时区 {tz}）")
                 logger.info(
                     f"[proactive_guard] 定时任务已注册（cron_manager）: 生成 {gen_cron} "
                     f"/ 分钟检查 * * * * *（时区 {tz}）"
@@ -3258,14 +3169,6 @@ class ProactiveGuardCore(_PluginCoreBase):
                 id="pg_min",
                 misfire_grace_time=30,
             )
-            if self._cfg_bool("memory_enabled", True):
-                mem_cron = str(self.config.get("memory_cron") or "0 3 * * *").strip()
-                self._fallback_sched.add_job(
-                    self._on_memory_time,
-                    CronTrigger.from_crontab(mem_cron, timezone=tz),
-                    id="pg_mem",
-                    misfire_grace_time=600,
-                )
             self._fallback_sched.start()
             logger.info(
                 f"[proactive_guard] 定时任务已注册（APScheduler）: 生成 {gen_cron} "
@@ -3281,13 +3184,6 @@ class ProactiveGuardCore(_PluginCoreBase):
         所以这里先强制刷一次记忆（不靠 30 分钟冷却），再拿新记忆去校正今天还没发的那几条。
         """
         try:
-            if self._cfg_bool("memory_enabled", True) and self._cfg_bool(
-                "memory_refresh_before_gen", True
-            ):
-                try:
-                    await self.refresh_memory()
-                except Exception as e:
-                    logger.warning(f"[proactive_guard] 生成前刷新记忆失败: {e}")
             if self._cfg_bool("dispatch_regenerate_on_memory_change", True):
                 try:
                     # 顺序：先把昨日预生成的那份提升为今日计划，再检查它是否基于旧记忆。
@@ -3394,7 +3290,7 @@ class ProactiveGuardCore(_PluginCoreBase):
         memory = await self._collect_memory()
         memory_block = ""
         if memory:
-            memory_block = MEMORY_BLOCK_TEMPLATE.format(memory=memory)
+            memory_block = MEM0_RECALL_TEMPLATE.replace("{memories}", memory)
             logger.debug(
                 f"[proactive_guard] 已读取记忆 {len(memory)} 字，用于生成（{target_date}）"
             )
@@ -3673,9 +3569,15 @@ class ProactiveGuardCore(_PluginCoreBase):
             await self.put_kv_data("daily_plan", plan)
 
     async def _memory_updated(self) -> str:
-        """当前记忆库的更新时间（水位）。空表示还没有记忆。"""
-        store = await self._load_memory_store()
-        return str(store.get("updated") or "")
+        """当前记忆水位（唯一来源：Mem0 的最后一次成功写入时间）。空表示还没有记忆。"""
+        engine = getattr(self.owner, "living_memory", None)
+        if engine is None:
+            return ""
+        try:
+            return engine.watermark()
+        except Exception as e:
+            logger.warning(f"[proactive_guard] 取记忆水位失败: {e}")
+            return ""
 
     async def _fact_check_message(self, text: str, memory: str) -> str:
         """发送前拿最新记忆复核一条待发消息。
@@ -3851,363 +3753,20 @@ class ProactiveGuardCore(_PluginCoreBase):
     # 记忆库（凌晨总结对话 -> 生成时注入 -> 发完回写历史）
     # ================================================================== #
 
-    async def refresh_memory(self, umo: str | None = None) -> str:
-        """把近期对话交给 AI 总结，写入记忆库（KV）。
-
-        记忆库结构（KV key = MEMORY_KEY）：
-        {
-          "updated": "2026-10-15 03:00",
-          "items": [{"umo": "...", "summary": "...", "updated": "..."}]
-        }
-
-        与原始历史不同，这里存的是**AI 提炼过的要点**（称呼、正在做的事、
-        情绪状态、提过的偏好与约定），比整段对话更省 token、也更聚焦，
-        并且会滚动更新（每次把「旧摘要 + 新对话」一起交给 AI 重写）。
-        """
-        if not self._cfg_bool("memory_enabled", True):
-            return ""
-        try:
-            cm = getattr(self.context, "conversation_manager", None)
-            if cm is None or not hasattr(cm, "get_conversation"):
-                return ""
-            targets = [umo] if umo else await self._collect_target_sessions()
-            if not targets:
-                return ""
-            store = await self._load_memory_store()
-            items = {str(it.get("umo", "")): it for it in store.get("items", []) if it}
-            max_chars = max(200, self._cfg_int("memory_max_chars", 1500))
-            turns = max(2, self._cfg_int("memory_turns", 20))
-            window_hours = max(0, self._cfg_int("memory_window_hours", 48))
-            rewrite_stale = self._cfg_bool("memory_rewrite_stale", True)
-            notes = await self._collect_user_notes()
-            for target in targets:
-                try:
-                    lines = await self._history_lines(cm, target, turns, window_hours)
-                    old = str(items.get(target, {}).get("summary", "")).strip()
-                    # 没有新对话的会话原来直接 continue，导致旧摘要里的错误永远不被修正
-                    # （比如「待办：万事达卡」即使人早领了也一直留着）。这里让旧记忆
-                    # 也按新规则过一次，只整理、不新增。
-                    if not lines and not (rewrite_stale and old):
-                        continue
-                    if lines:
-                        raw = "\n".join(lines)
-                    else:
-                        raw = (
-                            "（这个会话近期没有新对话。请只整理上面的旧记忆：删掉已完成、"
-                            "已过期、被用户笔记否定的条目，合并重复项，保留仍然成立的事实；"
-                            "不要新增任何对话里没出现过的信息。）"
-                        )
-                    prompt = MEMORY_PROMPT.format(
-                        old=old or "（暂无）",
-                        notes=notes or "（无）",
-                        raw=raw[-max_chars * 2 :],
-                        max_chars=max_chars,
-                    )
-                    summary = (await self._llm_chat(prompt)).strip()
-                    summary = self._clean_message(summary) if "\n" not in summary else summary
-                    if not summary:
-                        continue
-                    items[target] = {
-                        "umo": target,
-                        "summary": summary[:max_chars],
-                        "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    }
-                except Exception as e:
-                    logger.warning(f"[proactive_guard] 总结会话记忆失败（{target}）: {e}")
-            if not items:
-                return ""
-            # 多会话 -> 合并成一份去重档案。原来三分段并列，同一件事（熬夜、不吃早饭）
-            # 会被写三遍，注入时既费 token 又像复读。
-            merged = ""
-            if len(items) > 1:
-                try:
-                    packed = "\n\n".join(
-                        f"【会话 {i + 1}】\n{str(it.get('summary', '')).strip()}"
-                        for i, it in enumerate(items.values())
-                    )
-                    merged = await self._llm_chat(
-                        MEMORY_MERGE_PROMPT.format(items=packed, max_chars=max_chars)
-                    )
-                    merged = self._filter_memory_lines(merged)[:max_chars]
-                except Exception as e:
-                    logger.warning(f"[proactive_guard] 记忆合并失败，沿用分会话记忆: {e}")
-                    merged = ""
-            store = {
-                "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "items": list(items.values()),
-                "merged": merged,
-            }
-            await self.put_kv_data(MEMORY_KEY, store)
-            logger.info(
-                f"[proactive_guard] 记忆已更新：{len(items)} 个会话"
-                f"（{', '.join(str(it.get('umo', '')) for it in items.values())}）"
-                f"，合并档案 {'已生成' if merged else '未生成'}"
-            )
-            return self._memory_text(store)
-        except Exception as e:
-            logger.warning(f"[proactive_guard] 刷新记忆失败: {e}")
-            return ""
-
-    async def _load_memory_store(self) -> dict:
-        try:
-            data = await self.get_kv_data(MEMORY_KEY, None)
-            if isinstance(data, dict) and isinstance(data.get("items"), list):
-                return data
-        except Exception:
-            pass
-        return {"items": []}
-
-    @staticmethod
-    def _filter_memory_lines(text: str) -> str:
-        """丢掉「在描述助手自己」的条目，并按内容去重。
-
-        兜底层：即使提示词写明不要写 AI 自我介绍，模型仍会加上「助手自称魔女」
-        「助手会提醒喝水」这类行。这些由人格设定负责，留在记忆里只会重复并挤占预算。
-        """
-        out: list[str] = []
-        seen: set[str] = set()
-        for raw in str(text or "").splitlines():
-            line = raw.strip().lstrip("-*•·　").strip()
-            if not line:
-                continue
-            head = line[:10].lower()
-            if head.startswith(_MEMORY_SELF_SUBJECTS) or "助手" in head:
-                continue
-            key = re.sub(r"[\s，。；、,.：:!！?？~～]+", "", line)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(line)
-        return "\n".join(out)
-
-    def _memory_text(self, store: dict) -> str:
-        """把记忆库渲染成注入提示词的一段文本。
-
-        优先用合并后的单一档案（merged）；没有（单会话 / 合并失败）才回退分会话拼装。
-        两种情况都过 _filter_memory_lines。
-        """
-        store = store or {}
-        merged = self._filter_memory_lines(str(store.get("merged") or ""))
-        if merged:
-            return merged
-        items = [it for it in store.get("items", []) if it and it.get("summary")]
-        if not items:
-            return ""
-        if len(items) == 1:
-            return self._filter_memory_lines(str(items[0]["summary"]).strip())
-        # 跨会话拼装：同名事实只留第一条（按「去掉标点后的正文」判重，
-        # 不能用「【umo】+正文」判重，否则前缀不同会让重复行全部留下）
-        lines: list[str] = []
-        seen: set[str] = set()
-        for it in items:
-            body = self._filter_memory_lines(str(it["summary"]).strip())
-            if not body:
-                continue
-            key = re.sub(r"[\s，。；、,.：:!！?？~～]+", "", body)
-            if key in seen:
-                continue
-            seen.add(key)
-            lines.append(f"【{it.get('umo', '')}】{body}")
-        return "\n".join(lines)
-
-    def _workspaces_dir(self) -> Path:
-        """AstrBot 数据目录下的 workspaces（插件在 <data>/plugins/<name>/main.py）。"""
-        try:
-            return Path(__file__).resolve().parent.parent.parent / "workspaces"
-        except Exception:
-            return Path("")
-
-    async def _collect_user_notes(self) -> str:
-        """读取用户自己写在工作区里的 user_profile.md。
-
-        为什么必须读它：记忆摘要由 AI 滚动生成，用户改的事实（例如「卡已领」）
-        要等下一轮总结才可能被吸收，而且常常被旧摘要里的待办压住。笔记是用户
-        亲手写的**事实源**，直接拼进上下文，改写立刻生效、绕开摘要滞后。
-        """
-        if not self._cfg_bool("memory_notes_enabled", True):
-            return ""
-        budget = max(200, self._cfg_int("memory_notes_chars", 1200))
-        try:
-            root = self._workspaces_dir()
-            if not root or not root.is_dir():
-                return ""
-            files = sorted(
-                root.glob("*/user_profile.md"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-        except Exception as e:
-            logger.debug(f"[proactive_guard] 扫描用户笔记失败: {e}")
-            return ""
-        chunks: list[str] = []
-        seen: set[str] = set()
-        used = 0
-        for f in files[:5]:
-            try:
-                body = f.read_text(encoding="utf-8", errors="replace").strip()
-            except Exception:
-                continue
-            body = re.sub(r"\n{3,}", "\n\n", body)[:budget]
-            key = re.sub(r"\s+", "", body)
-            if not body or key in seen:
-                continue
-            seen.add(key)
-            chunks.append(body)
-            used += len(body)
-            if used >= budget:
-                break
-        if not chunks:
-            return ""
-        logger.debug(f"[proactive_guard] 已读取用户笔记 {used} 字（{len(chunks)} 份）")
-        return MEMORY_NOTES_TEMPLATE.format(notes="\n".join(chunks))
-
+    # ------------------------------------------------------------------ #
+    # 记忆（唯一来源：Mem0。旧的 KV 摘要 / user_profile.md 笔记 / 原始历史
+    # 兜底链路已在阶段二整体删除，禁止在这里重新引入第二份存储）
+    # ------------------------------------------------------------------ #
     async def _collect_memory(self) -> str:
-        """取记忆文本：AI 总结的记忆库 + 用户笔记；为空则实时总结；再不行退回原始历史。
-
-        三级降级是为了保证「第一次运行、还没到总结时间」时也有记忆可用。
-        另外在返回前按 `memory_refresh_cooldown` 冷却做一次就地刷新——只靠每天
-        03:00 那一次，白天发生的事最多要滞后近 24 小时才可能进入主动消息。
-        """
-        if not self._cfg_bool("memory_enabled", True):
+        """当前记忆文本。提示词注入与发送前事实校验共用这一个来源。"""
+        engine = getattr(self.owner, "living_memory", None)
+        if engine is None:
             return ""
-        notes = await self._collect_user_notes()
         try:
-            store = await self._load_memory_store()
-            if await self._memory_refresh_due(store):
-                async with self._memory_lock:
-                    # 双检：等锁期间别人可能刚刷过
-                    store = await self._load_memory_store()
-                    if await self._memory_refresh_due(store):
-                        logger.debug("[proactive_guard] 记忆已过期，生成前就地刷新")
-                        await self.refresh_memory()
-                        store = await self._load_memory_store()
-            text = self._memory_text(store)
-            if not text:
-                # 记忆库还空着：立刻总结一次（首次生成计划时就地建库）
-                text = await self.refresh_memory()
-            if text:
-                merged = self._truncate_memory(text)
-                return (notes + "\n" + merged) if notes else merged
+            return await engine.memory_text()
         except Exception as e:
-            logger.debug(f"[proactive_guard] 读取记忆库失败，回退原始历史: {e}")
-        if not self._cfg_bool("memory_raw_fallback", True):
-            return notes
-        raw = self._truncate_memory(await self._collect_raw_history())
-        if notes and raw:
-            return notes + "\n" + raw
-        return notes or raw
-
-    async def _memory_refresh_due(self, store: dict) -> bool:
-        """记忆是否到了该刷新的时间（按 memory_refresh_cooldown 分钟冷却）。"""
-        try:
-            cooldown = max(5, self._cfg_int("memory_refresh_cooldown", 30))
-            stamp = str((store or {}).get("updated", "") or "").strip()
-            if not stamp:
-                return True
-            last = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
-            return (datetime.now() - last).total_seconds() >= cooldown * 60
-        except Exception:
-            return False
-
-    def _truncate_memory(self, text: str) -> str:
-        budget = max(200, self._cfg_int("memory_max_chars", 1500))
-        if len(text) <= budget:
-            return text
-        kept = text[-budget:]
-        nl = kept.find("\n")
-        if nl != -1:
-            kept = kept[nl + 1 :]
-        return kept
-
-    async def _collect_raw_history(self) -> str:
-        """兜底：未经总结的原始对话历史（短、杂，不如记忆库聚焦）。"""
-        turns = max(1, self._cfg_int("memory_turns", 20))
-        try:
-            cm = getattr(self.context, "conversation_manager", None)
-            if cm is None or not hasattr(cm, "get_conversation"):
-                return ""
-            targets = await self._collect_target_sessions()
-            if not targets:
-                return ""
-            merged: list[str] = []
-            for umo in targets[:5]:
-                lines = await self._history_lines(cm, umo, turns)
-                if len(lines) > len(merged):
-                    merged = lines
-            return "\n".join(merged)
-        except Exception as e:
-            logger.debug(f"[proactive_guard] 读取原始历史失败: {e}")
+            logger.warning(f"[proactive_guard] 取记忆失败: {e}")
             return ""
-
-    async def _history_lines(
-        self, cm, umo: str, turns: int, window_hours: int | None = None
-    ) -> list[str]:
-        """把单个会话的历史整理成「[MM-DD HH:MM] 用户：…」行列表。
-
-        `window_hours > 0` 时按时间窗过滤，而不是只数条数——只取「最近 N 条」
-        会让一句纠正很快滑出窗口，旧摘要里的错误待办就被原样继承下去。
-        时间来自 AstrBot 注入在用户消息里的 <system_reminder>Current datetime: …；
-        拿不到时间戳的老数据退化为「取最近 turns 条」。
-        """
-        try:
-            cid = await cm.get_curr_conversation_id(umo)
-            if not cid:
-                return []
-            conv = await cm.get_conversation(umo, cid)
-            raw = getattr(conv, "history", None) if conv is not None else None
-            if not raw:
-                return []
-            history = json.loads(raw) if isinstance(raw, str) else raw
-            if not isinstance(history, list):
-                return []
-            cutoff = None
-            if window_hours and window_hours > 0:
-                cutoff = datetime.now() - timedelta(hours=window_hours)
-            records: list[tuple[datetime | None, str]] = []
-            last_ts: datetime | None = None
-            for msg in history:
-                if not isinstance(msg, dict):
-                    continue
-                role = str(msg.get("role", ""))
-                content = msg.get("content", "")
-                # content 可能是多模态数组，只取文本部分（think 段不带 text，自动跳过）
-                if isinstance(content, list):
-                    parts = [
-                        str(p.get("text", ""))
-                        for p in content
-                        if isinstance(p, dict) and p.get("text")
-                    ]
-                    content = " ".join(parts)
-                content = str(content)
-                m = _TS_RE.search(content)
-                if m:
-                    try:
-                        last_ts = datetime.strptime(
-                            f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M"
-                        )
-                    except ValueError:
-                        pass
-                content = _SYS_REMINDER_RE.sub("", content).strip().replace("\n", " ")
-                if not content:
-                    continue
-                if role == "user":
-                    records.append((last_ts, f"用户：{content}"))
-                elif role == "assistant":
-                    records.append((last_ts, f"你：{content}"))
-            if cutoff is not None:
-                kept = [r for r in records if r[0] is None or r[0] >= cutoff]
-                # 全被时间窗滤掉（长时间没聊）时保留尾巴，别让记忆凭空失忆
-                if kept:
-                    records = kept
-            if len(records) > turns:
-                records = records[-turns:]
-            out: list[str] = []
-            for ts, line in records:
-                out.append(f"[{ts.strftime('%m-%d %H:%M')}] {line}" if ts else line)
-            return out
-        except Exception as e:
-            logger.debug(f"[proactive_guard] 读取会话历史失败（{umo}）: {e}")
-            return []
 
     # ------------------------------------------------------------------ #
     # 人格 / 世界观 / 分享比例
@@ -4431,62 +3990,67 @@ class ProactiveGuardCore(_PluginCoreBase):
                 return line.strip()
         return ""
 
-    async def _on_memory_time(self) -> None:
-        """到记忆总结时间：把近期对话交给 AI 总结，写进记忆库（后台静默）。"""
-        try:
-            await self.refresh_memory()
-        except Exception as e:
-            logger.error(f"[proactive_guard] 记忆总结失败: {e}", exc_info=True)
-
     async def memory_command(self, event: AstrMessageEvent):
-        """查看当前记忆库内容。
-
-        重点是展示「真正注入给 AI 的那份档案」（merged，已剔除 AI 自述 + 去重），
-        分会话明细放后面折叠显示，方便核对来源。
-        """
-        store = await self._load_memory_store()
-        items = [it for it in store.get("items", []) if it]
-        lines: list[str] = ["🧠 记忆库"]
+        """ `/记忆`：直接展示 Mem0（唯一记忆源）里的内容，和 AI 实际召回同源。"""
+        engine = getattr(self.owner, "living_memory", None)
+        if engine is None or not engine.enabled:
+            yield event.plain_result("⚠️ 长期记忆没有初始化成功，请看日志里的 [memory] 行。")
+            return
+        try:
+            items = await engine.list_memories()
+        except Exception as e:
+            yield event.plain_result(f"记忆读取失败：{e}")
+            return
         if not items:
-            lines.append("（还没有记忆。到 memory_cron 时间会自动总结，或现在用 /刷新记忆 立刻生成）")
-        else:
-            lines.append(f"最后更新：{store.get('updated', '未知')}　会话数：{len(items)}")
-            archive = self._memory_text(store)
+            yield event.plain_result("🧠 记忆库还是空的（世界观观测也没写进去？看日志 [memory]）。")
+            return
+        lines = [f"🧠 记忆（共 {len(items)} 条，来源 Mem0 scope={engine.scope_id()}）", ""]
+        shown = 0
+        for it in items[:40]:
+            text = " ".join(str(it.get("memory") or "").split())
+            if not text:
+                continue
+            meta = it.get("metadata") if isinstance(it.get("metadata"), dict) else {}
+            mark = "◆" if str(meta.get("kind") or "") == "worldview" else "·"
+            created = str(it.get("created_at") or "")[:10]
+            lines.append(f"{mark} {text}" + (f"（{created}）" if created else ""))
+            shown += 1
+        if len(items) > shown:
             lines.append("")
-            lines.append("—— 注入给 AI 的档案 ——")
-            lines.append(archive or "（空：记忆被过滤后没有剩下可用内容）")
-            if len(items) > 1:
-                lines.append("")
-                lines.append("—— 分会话明细 ——")
-                for it in items:
-                    body = str(it.get("summary", "")).strip()
-                    lines.append(f"【{it.get('umo', '')}】{it.get('updated', '')}")
-                    lines.append(body[:400] + ("…" if len(body) > 400 else ""))
-        if not self._cfg_bool("memory_enabled", True):
-            lines.append("")
-            lines.append("⚠️ 记忆功能当前已关闭（memory_enabled = false）")
+            lines.append(f"……还有 {len(items) - shown} 条没显示。")
         yield event.plain_result("\n".join(lines))
 
     async def refresh_memory_command(self, event: AstrMessageEvent):
-        """立刻让 AI 总结一次对话，写入记忆库"""
-        if not self._cfg_bool("memory_enabled", True):
-            yield event.plain_result("⚠️ 记忆功能已关闭，请先在配置里打开 memory_enabled。")
+        """立刻把缓冲区里的对话写进 Mem0（不再做二次总结）。"""
+        engine = getattr(self.owner, "living_memory", None)
+        if engine is None or not engine.enabled:
+            yield event.plain_result("⚠️ 长期记忆没有初始化成功，请看日志里的 [memory] 行。")
             return
-        yield event.plain_result("⏳ 正在总结记忆…")
-        asyncio.create_task(self.refresh_memory())
+        try:
+            n = await engine.flush_now()
+        except Exception as e:
+            yield event.plain_result(f"⚠️ 写入失败：{e}")
+            return
+        yield event.plain_result(
+            f"已写入 Mem0 {n} 条消息。" if n else "缓冲区里没有待写的对话（等聊几轮再来）。"
+        )
 
     async def reset_memory_command(self, event: AstrMessageEvent):
-        """清空记忆库并按当前规则重建（用来洗掉历史遗留的错误条目）。"""
-        if not self._cfg_bool("memory_enabled", True):
-            yield event.plain_result("⚠️ 记忆功能已关闭，请先在配置里打开 memory_enabled。")
+        """清空唯一 scope 并重播世界观观测。"""
+        engine = getattr(self.owner, "living_memory", None)
+        if engine is None or not engine.enabled:
+            yield event.plain_result("⚠️ 长期记忆没有初始化成功，请看日志里的 [memory] 行。")
             return
-        # 必须走 KV 接口写空，不能直接改数据库：AstrBot 的 preferences 在内存里有副本，
-        # 直接改 sqlite 会被下一次写回覆盖掉。
-        await self.put_kv_data(MEMORY_KEY, {"updated": "", "items": [], "merged": ""})
+        try:
+            removed = await engine.reset_scope()
+            seeded = await engine.seed_worldview()
+        except Exception as e:
+            yield event.plain_result(f"⚠️ 重置失败：{e}")
+            return
         yield event.plain_result(
-            "🧹 记忆库已清空，正在按「近期对话 + 用户笔记」重建…（完成后用 /记忆 查看）"
+            f"🧹 记忆已清空（删除 {removed} 条），并重新写回世界观观测 {seeded} 条。"
         )
-        asyncio.create_task(self.refresh_memory())
+
     # ================================================================== #
     # 指令（用户主动触发时才回复）
     # ================================================================== #
@@ -4887,38 +4451,10 @@ class ProactiveGuardCore(_PluginCoreBase):
                 f"proactive_decision_{self._living_sid(umo)}",
             )
         await self._living_save(state)
-        if self._cfg_bool("memory_enabled", True):
-            await self._living_schedule_memory()
         logger.info(
             f"[living] 主动消息 v2 调度已启动：{len(sessions)} 个会话"
             "（插件内部 AsyncIOScheduler，不依赖 cron_manager）"
         )
-
-    async def _living_schedule_memory(self) -> None:
-        sched = getattr(self, "_living_sched", None)
-        if sched is None:
-            return
-        cron = str(self.config.get("memory_cron") or "0 3 * * *").strip()
-        tz = self._living_tz()
-        try:
-            from apscheduler.triggers.cron import CronTrigger
-
-            trigger = (
-                CronTrigger.from_crontab(cron, timezone=tz)
-                if tz is not None
-                else CronTrigger.from_crontab(cron)
-            )
-            sched.add_job(
-                self._on_memory_time,
-                trigger,
-                id="living_memory",
-                replace_existing=True,
-                coalesce=True,
-                max_instances=1,
-                misfire_grace_time=600,
-            )
-        except Exception as e:
-            logger.warning(f"[living] 记忆任务注册失败: {e}")
 
     async def _living_stop(self) -> None:
         sched = getattr(self, "_living_sched", None)
@@ -5264,24 +4800,6 @@ class ProactiveGuardCore(_PluginCoreBase):
                         parts.append(block.strip())
                 except Exception as e:
                     logger.warning(f"[living] 长期记忆召回失败: {e}")
-        # KV 记忆摘要（原有实现，保留作降级）
-        if self._cfg_bool("memory_enabled", True):
-            try:
-                memory = await self._collect_memory()
-            except Exception as e:
-                logger.warning(f"[living] 取记忆失败: {e}")
-                memory = ""
-            if memory:
-                try:
-                    parts.append(
-                        MEMORY_BLOCK_TEMPLATE.format(
-                            memory=self._truncate_memory(memory)
-                        ).strip()
-                    )
-                except Exception:
-                    parts.append(
-                        "【关于对方，你记得的事】" + chr(10) + self._truncate_memory(memory)
-                    )
         return (chr(10) + chr(10)).join(p for p in parts if p)
 
     def _tsundere_encrypt_level(self, umo: str = "") -> int:
@@ -5818,18 +5336,24 @@ class LivingMemoryCore(_PluginCoreBase):
     def _on(self) -> bool:
         return self._cfg_bool("mem0_enabled", False)
 
+    @property
+    def enabled(self) -> bool:
+        """命令层与状态展示用的启用位（等价 _on()，真实引擎也有这个属性）。"""
+        return self._on()
+
     def _sid(self, umo: str) -> str:
         out = []
         for ch in str(umo or ""):
             out.append(ch if (ch.isalnum() or ch in "_-") else "_")
         return "".join(out)[:80] or "default"
 
-    def _uid(self, umo: str) -> str:
-        # 跨会话共享：同一个人在 QQ / 语音通道里有同一份长期记忆（默认关闭，按会话隔离）
-        shared = _shared_scope_id(self.config)
-        if shared:
-            return "u_shared_" + shared
-        return "u_" + self._sid(umo)
+    def _uid(self, umo: str = "") -> str:
+        # 阶段二：全插件只读写这一个 scope。AstrBot 被当作「一个人」，记忆不按会话/通道分区。
+        return "u_" + _memory_scope_id(self.config)
+
+    def scope_id(self) -> str:
+        """当前记忆 scope（展示与自检用）。"""
+        return self._uid("")
 
     def _data_dir(self) -> str:
         data = _plugin_data_dir()
@@ -5944,10 +5468,22 @@ class LivingMemoryCore(_PluginCoreBase):
         mem = await self._ensure()
         if mem is None:
             return
+        # 顺序很重要：先把旧 scope 的记忆合并进唯一 scope，再补世界观种子。
+        # 反过来的话种子的「已存在」判据看不到旧 scope 那 34 条，会写进两份。
         try:
-            await self.seed_worldview()
+            await self.migrate_scopes()
+        except Exception as e:
+            logger.warning(f"[memory] 旧记忆 scope 迁移失败: {e}")
+        try:
+            seeded = await self.seed_worldview()
+            if seeded:
+                self._touch_meta("seeded_at")
         except Exception as e:
             logger.warning(f"[memory] 种子记忆写入失败: {e}")
+        try:
+            await self.dedupe_scope()
+        except Exception as e:
+            logger.warning(f"[memory] 重复条目清理失败: {e}")
 
     # ---------------------------- 召回 ---------------------------- #
     def _affect_context(self, umo: str, affect: dict | None = None) -> dict:
@@ -6078,7 +5614,7 @@ class LivingMemoryCore(_PluginCoreBase):
         mem = await self._ensure()
         if mem is None:
             return 0
-        uid = "elaina_world"
+        uid = self._uid("")
         have = set()
         try:
             # mem0 v2 的 get_all 默认 top_k=20，种子有 34 条 → 必须显式放大，
@@ -6122,7 +5658,7 @@ class LivingMemoryCore(_PluginCoreBase):
         if not umo or not text:
             return
         buf = self._recent.setdefault(self._sid(umo), [])
-        buf.append({"role": "user", "content": text[:500]})
+        buf.append({"role": "user", "content": text[:500], "umo": umo})
         del buf[:-12]
 
     async def on_llm_response(self, event, resp) -> None:
@@ -6137,7 +5673,7 @@ class LivingMemoryCore(_PluginCoreBase):
             return
         sid = self._sid(umo)
         buf = self._recent.setdefault(sid, [])
-        buf.append({"role": "assistant", "content": text[:500]})
+        buf.append({"role": "assistant", "content": text[:500], "umo": umo})
         del buf[:-16]
         turns = sum(1 for m in buf if m.get("role") == "user")
         if turns < max(1, self._cfg_int("mem0_flush_turns", 4)):
@@ -6151,15 +5687,232 @@ class LivingMemoryCore(_PluginCoreBase):
         if mem is None:
             return
         infer = self._cfg_bool("mem0_infer", False)
-        meta = {"kind": "chat", "session": self._sid(umo)}
+        meta = {"kind": "chat", "session": self._sid(umo or "")}
+        clean = [
+            {"role": str(m.get("role") or "user"), "content": str(m.get("content") or "")}
+            for m in msgs
+            if str(m.get("content") or "").strip()
+        ]
+        if not clean:
+            return
         try:
             t0 = time.time()
             await asyncio.to_thread(
-                mem.add, msgs, user_id=self._uid(umo), infer=infer, metadata=meta
+                mem.add, clean, user_id=self._uid(""), infer=infer, metadata=meta
             )
-            logger.info(f"[memory] 已写入记忆 {len(msgs)} 条（{time.time() - t0:.1f}s, infer={infer}）")
+            self._touch_meta()
+            logger.info(
+                f"[memory] 已写入记忆 {len(clean)} 条（{time.time() - t0:.1f}s, "
+                f"infer={infer}, scope={self._uid('')}）"
+            )
         except Exception as e:
             logger.warning(f"[memory] 写入记忆失败: {e}")
+
+    # ---------------------- 单一记忆源：scope / 水位 / 展示 ---------------------- #
+    def _meta_file(self) -> str:
+        return os.path.join(self._data_dir(), "mem0_meta.json")
+
+    def _meta_load(self) -> dict:
+        try:
+            with open(self._meta_file(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _meta_save(self, data: dict) -> None:
+        try:
+            with open(self._meta_file(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"[memory] 写入元数据失败: {e}")
+
+    def _touch_meta(self, key: str = "last_write_at") -> None:
+        data = self._meta_load()
+        data[key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data["writes"] = int(data.get("writes") or 0) + 1
+        self._meta_save(data)
+
+    def watermark(self) -> str:
+        """记忆水位：最后一次成功写入 Mem0 的时间（计划是否过时的判据）。"""
+        data = self._meta_load()
+        return str(data.get("last_write_at") or data.get("seeded_at") or "")
+
+    async def list_memories(self, top_k: int = 200) -> list:
+        """列出唯一 scope 里的全部记忆（ `/记忆` 与提示词共用的唯一数据源）。"""
+        if not self._on():
+            return []
+        mem = await self._ensure()
+        if mem is None:
+            return []
+        try:
+            res = await asyncio.to_thread(
+                mem.get_all,
+                filters={"user_id": self._uid("")},
+                top_k=max(50, int(top_k)),
+            )
+        except Exception as e:
+            logger.warning(f"[memory] 列出记忆失败: {e}")
+            return []
+        items = res.get("results") if isinstance(res, dict) else res
+        out = [
+            it
+            for it in items or []
+            if isinstance(it, dict) and str(it.get("memory") or "").strip()
+        ]
+        out.sort(key=lambda it: str(it.get("created_at") or ""), reverse=True)
+        return out
+
+    async def memory_text(self, chars: int = 0) -> str:
+        """记忆压成一段文本（提示词注入 / 发送前事实校验共用同一来源）。"""
+        items = await self.list_memories()
+        lines = []
+        for it in items:
+            text = " ".join(str(it.get("memory") or "").split())
+            if text:
+                lines.append("- " + text)
+        if not lines:
+            return ""
+        limit = int(chars or 3000)
+        return chr(10).join(lines)[:limit]
+
+    async def flush_now(self) -> int:
+        """立刻把缓冲区里的对话写进 Mem0（手动刷新用；不做二次总结）。"""
+        if not self._on():
+            return 0
+        total = 0
+        for _sid, buf in list(self._recent.items()):
+            if not buf:
+                continue
+            batch = list(buf)
+            buf.clear()
+            umo = str(next((m.get("umo") for m in batch if m.get("umo")), "") or "")
+            await self._write(umo, batch)
+            total += len(batch)
+        return total
+
+    async def reset_scope(self) -> int:
+        """清空唯一 scope 的全部记忆（世界观观测随后由 seed_worldview 重播）。"""
+        if not self._on():
+            return 0
+        mem = await self._ensure()
+        if mem is None:
+            return 0
+        uid = self._uid("")
+        items = await self.list_memories(top_k=1000)
+        try:
+            await asyncio.to_thread(mem.delete_all, user_id=uid)
+        except Exception as e:
+            logger.warning(f"[memory] 清空记忆失败: {e}")
+            return 0
+        self._seeded = False
+        self._meta_save({"last_write_at": "", "writes": 0})
+        logger.info(f"[memory] 已清空记忆 scope={uid}（{len(items)} 条）")
+        return len(items)
+
+    async def migrate_scopes(self) -> int:
+        """把旧版分散在多个 user_id 下的记忆合并进唯一 scope（幂等，可重复跑）。"""
+        if not self._on() or not self._cfg_bool("mem0_migrate_legacy", True):
+            return 0
+        mem = await self._ensure()
+        if mem is None:
+            return 0
+        target = self._uid("")
+        scope = _memory_scope_id(self.config)
+        raw = None
+        try:
+            raw = await asyncio.to_thread(mem.get_all, filters=None, top_k=1000)
+        except Exception:
+            raw = None
+        if raw is None:
+            rows = []
+            for uid in ("elaina_world", "u_shared_" + scope, "u_" + scope):
+                try:
+                    part = await asyncio.to_thread(
+                        mem.get_all, filters={"user_id": uid}, top_k=1000
+                    )
+                except Exception:
+                    continue
+                items = part.get("results") if isinstance(part, dict) else part
+                rows.extend(items or [])
+            raw = {"results": rows}
+        items = raw.get("results") if isinstance(raw, dict) else raw
+        groups = {}
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            uid = str(it.get("user_id") or "")
+            text = " ".join(str(it.get("memory") or "").split())
+            if not uid or not text or uid == target:
+                continue
+            groups.setdefault(uid, []).append(text)
+        moved = 0
+        for uid, texts in groups.items():
+            for text in texts:
+                try:
+                    await asyncio.to_thread(
+                        mem.add,
+                        text,
+                        user_id=target,
+                        infer=False,
+                        metadata={"kind": "chat", "migrated_from": uid},
+                    )
+                    moved += 1
+                except Exception as e:
+                    logger.warning(f"[memory] 迁移写入失败（{uid}）: {e}")
+            try:
+                await asyncio.to_thread(mem.delete_all, user_id=uid)
+            except Exception as e:
+                logger.warning(f"[memory] 删除旧 scope 失败（{uid}）: {e}")
+            logger.info(f"[memory] 旧 scope 已合并：{uid} → {target}（{len(texts)} 条）")
+        if moved:
+            self._touch_meta()
+            logger.info(f"[memory] 记忆 scope 归一完成：迁移 {moved} 条到 {target}")
+        return moved
+
+    async def dedupe_scope(self) -> int:
+        """清掉同一文本的重复条目（早期「先播种后迁移」会写两遍），幂等。
+
+        同文本只保留最早写入的那条（迁移来的条目 id 更旧或在种子之前），把后来
+        重复的删掉；先按数量差判断，没有重复就直接返回 0，不阻塞启动。
+        """
+        if not self._on():
+            return 0
+        try:
+            items = await self.list_memories(top_k=1000)
+        except Exception as e:
+            logger.warning(f"[memory] 去重读取失败（跳过）: {e}")
+            return 0
+        seen = set()
+        dups = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            text = " ".join(str(it.get("memory") or "").split())
+            if not text:
+                continue
+            if text in seen:
+                dups.append(it)
+            else:
+                seen.add(text)
+        if not dups:
+            return 0
+        removed = 0
+        mem = await self._ensure()
+        if mem is None:
+            return 0
+        for it in dups:
+            mid = it.get("id") or it.get("memory_id")
+            if not mid:
+                continue
+            try:
+                await asyncio.to_thread(mem.delete, mid)
+                removed += 1
+            except Exception as e:
+                logger.warning(f"[memory] 删除重复条目失败（{mid}）: {e}")
+        if removed:
+            logger.info(f"[memory] 去重：删除重复条目 {removed} 条（scope={self.scope_id()}）")
+        return removed
 
     # ---------------------------- 观测与收尾 ---------------------------- #
     def recent_text(self, umo: str, limit: int = 3) -> str:
@@ -6175,6 +5928,8 @@ class LivingMemoryCore(_PluginCoreBase):
             "init_failed": self._init_failed,
             "seeded": self._seeded,
             "buffers": {k: len(v) for k, v in self._recent.items()},
+            "scope": self._uid(""),
+            "watermark": self.watermark(),
             "tasks": len(self._tasks),
         }
 
@@ -6226,6 +5981,10 @@ class LivingMemoryCore(_PluginCoreBase):
 # ===========================================================================
 
 AFFECT_PAD_KEYS = ("p", "a", "d")
+# 全局单例状态：整个插件只有一份 PAD，文件里不再有 sessions / session_id 分区键
+AFFECT_STATE_VERSION = 2
+AFFECT_STATE_FIELDS = ("pad", "baseline", "updated", "poignancy",
+                       "events", "silence_sev", "last_user_at")
 
 AFFECT_APPRAISE_PROMPT = """你在为角色「伊蕾娜」做一次即时情感评估。
 
@@ -6274,10 +6033,10 @@ class AffectCore(_PluginCoreBase):
     def __init__(self, owner: "ElainaSuitePlugin") -> None:
         super().__init__(owner)
         self._sched = None
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._global_lock = None  # 全局单例：所有会话共用同一把锁
         self._tasks: set = set()
         self._cache: dict | None = None
-        self._last_silence_at: dict[str, float] = {}
+        self._last_silence_at = None  # 上次沉默注入时间（全局唯一）
 
     # ------------------------------------------------------------- 配置读取
     def _cfg(self, key: str, default):
@@ -6314,39 +6073,72 @@ class AffectCore(_PluginCoreBase):
     # ------------------------------------------------------------- 状态存储
     def _state_file(self) -> str:
         data = _plugin_data_dir()
+        return os.path.join(data, "global_affect.json") if data else ""
+
+    def _legacy_state_file(self) -> str:
+        data = _plugin_data_dir()
         return os.path.join(data, "affect_state.json") if data else ""
 
-    def _sid(self, umo: str) -> str:
-        # 跨会话共享：语音通道与 QQ 主会话共用同一份 PAD 情感状态（默认关闭）
-        shared = _shared_scope_id(self.config)
-        if shared:
-            return "shared_" + shared
-        return re.sub(r"[^0-9A-Za-z_]+", "_", str(umo or ""))[:80] or "default"
+    def _lock(self) -> asyncio.Lock:
+        if self._global_lock is None:
+            self._global_lock = asyncio.Lock()
+        return self._global_lock
 
-    def _lock(self, umo: str) -> asyncio.Lock:
-        sid = self._sid(umo)
-        lk = self._locks.get(sid)
-        if lk is None:
-            lk = asyncio.Lock()
-            self._locks[sid] = lk
-        return lk
+    def _primary_user_id(self) -> str:
+        """主要交互对象 id（方案一）。为空 = 回退方案二（全局静默）。"""
+        return self._cstr("affect_primary_user_id", "").strip()
+
+    def _is_primary(self, umo: str, user_id: str = "") -> bool:
+        """这次交互是否来自「主要对象」。
+
+        `affect_primary_user_id` 支持用逗号/分号/空格分隔多个标识——同一个人可能
+        同时出现在 QQ（openid）与 webchat（用户名）等渠道，命中任意一个即算主要
+        对象；一个都没配则视为未配置，退化为方案二（任意交互都算有人在场）。
+        """
+        pid = self._primary_user_id()
+        if not pid:
+            return True  # 未配置主要对象：任意交互都算「有人在场」（方案二）
+        target = str(user_id or "")
+        text = str(umo or "")
+        for token in [t for t in re.split(r"[,，;；\s]+", pid) if t]:
+            if target and target == token:
+                return True
+            if token in text or token in target:
+                return True
+        return False
 
     def _load(self) -> dict:
+        """读取全局唯一情感状态；旧版分区文件首次读取时就地迁移。"""
         if self._cache is not None:
             return self._cache
-        path = self._state_file()
         data = {}
-        if path:
+        path = self._state_file()
+        legacy = self._legacy_state_file()
+        if path and os.path.exists(path):
             try:
-                if os.path.exists(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        raw = json.load(f)
-                    if isinstance(raw, dict):
-                        data = raw
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    data = self._migrate_legacy(path) if isinstance(raw.get("sessions"), dict) else raw
             except Exception as e:
-                logger.warning(f"[affect] 读取情感状态失败（按空处理）: {e}")
-        data.setdefault("sessions", {})
-        data.setdefault("version", 1)
+                logger.warning(f"[affect] 读取全局情感状态失败（按基线处理）: {e}")
+        elif legacy and os.path.exists(legacy):
+            data = self._migrate_legacy(legacy)
+        now = time.time()
+        if not isinstance(data.get("pad"), dict):
+            base = self._persona_baseline()
+            data = {"version": AFFECT_STATE_VERSION, "pad": dict(base), "baseline": dict(base),
+                    "updated": now, "poignancy": 0.0, "events": [], "silence_sev": 0.0,
+                    "last_user_at": now, "last_any_at": now}
+        else:
+            data["version"] = AFFECT_STATE_VERSION
+            data.setdefault("events", [])
+            data.setdefault("poignancy", 0.0)
+            data.setdefault("silence_sev", 0.0)
+            data.setdefault("updated", now)
+            data.setdefault("last_user_at", data.get("updated"))
+            data.setdefault("last_any_at", data.get("last_user_at"))
+            data.setdefault("baseline", self._persona_baseline())
         self._cache = data
         return data
 
@@ -6367,6 +6159,47 @@ class AffectCore(_PluginCoreBase):
             await asyncio.to_thread(_write)
         except Exception as e:
             logger.warning(f"[affect] 情感状态落盘失败: {e}")
+
+    def _migrate_legacy(self, path: str) -> dict:
+        """旧版「按会话分区」的 affect_state.json -> 全局单例。
+
+        合并策略：优先取当前共享作用域那条（shared_<id>），没有则取 updated 最大的一条
+        （即最近一次更新值）。旧文件改名 .migrated 留档，不删除，便于回滚。
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            logger.warning(f"[affect] 旧情感状态读取失败（按基线处理）: {e}")
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        if isinstance(raw.get("pad"), dict):
+            return {k: v for k, v in raw.items() if k in AFFECT_STATE_FIELDS}
+        sessions = raw.get("sessions")
+        if not isinstance(sessions, dict) or not sessions:
+            return {}
+        preferred = "shared_" + (_shared_scope_id(self.config) or "")
+        pick = sessions.get(preferred)
+        source = preferred
+        if not isinstance(pick, dict):
+            def _stamp(item):
+                value = item[1] if isinstance(item[1], dict) else {}
+                try:
+                    return float(value.get("updated") or 0.0)
+                except Exception:
+                    return 0.0
+            source, pick = max(sessions.items(), key=_stamp)
+        if not isinstance(pick, dict):
+            return {}
+        merged = {k: v for k, v in pick.items() if k in AFFECT_STATE_FIELDS}
+        logger.info("[affect] 已迁移旧情感状态为全局单例（来源 {}，旧文件共 {} 个会话）".format(
+            source, len(sessions)))
+        try:
+            os.replace(path, path + ".migrated")
+        except Exception as e:
+            logger.debug(f"[affect] 旧状态文件改名失败（不影响使用）: {e}")
+        return merged
 
     # ------------------------------------------------------------- 基线与衰减
     def _persona_baseline(self) -> dict:
@@ -6448,14 +6281,9 @@ class AffectCore(_PluginCoreBase):
         return out
 
     # ------------------------------------------------------------- 状态读写
-    def _entry(self, umo: str, now: float | None = None) -> dict:
-        data = self._load()
-        sid = self._sid(umo)
-        st = data["sessions"].get(sid)
-        if not isinstance(st, dict):
-            st = {}
-            data["sessions"][sid] = st
-        st.setdefault("umo", umo)
+    def _entry(self, umo: str = "", now: float | None = None) -> dict:
+        """兼容旧签名：返回全局唯一状态对象（umo 不再参与分区）。"""
+        st = self._load()
         st.setdefault("pad", self._persona_baseline())
         st.setdefault("baseline", self._persona_baseline())
         st.setdefault("updated", now or time.time())
@@ -6463,10 +6291,11 @@ class AffectCore(_PluginCoreBase):
         st.setdefault("events", [])
         st.setdefault("silence_sev", 0.0)
         st.setdefault("last_user_at", now or time.time())
+        st.setdefault("last_any_at", st.get("last_user_at"))
         return st
 
-    def get_state(self, umo: str, now: float | None = None) -> dict:
-        """取（并施加衰减后的）当前 PAD。衰减按真实 dt 折算，每次读都补算。"""
+    def get_state(self, umo: str = "", now: float | None = None) -> dict:
+        """取（并施加衰减后的）当前全局 PAD。任何会话读到的都是同一份。"""
         now = float(now if now is not None else time.time())
         st = self._entry(umo, now)
         sev = float(st.get("silence_sev") or 0.0)
@@ -6475,15 +6304,22 @@ class AffectCore(_PluginCoreBase):
         st["updated"] = now
         return st
 
-    def note_user(self, umo: str, now: float | None = None) -> None:
-        """记录用户互动：重置沉默严重度（沉默评估的偏离度归零）。"""
-        if not self._on() or not umo:
+    def note_user(self, umo: str = "", now: float | None = None, user_id: str = "") -> None:
+        """记录用户互动。
+
+        方案一：只有「主要交互对象」能重置沉默计时（last_user_at / silence_sev）；
+        其他会话的互动只更新 last_any_at 并照常影响 PAD，不会假装主人刚来过。
+        未配置主要对象时退化为方案二：任意互动都算在场。
+        """
+        if not self._on():
             return
         try:
             now = float(now if now is not None else time.time())
             st = self.get_state(umo, now)
-            st["last_user_at"] = now
-            st["silence_sev"] = 0.0
+            st["last_any_at"] = now
+            if self._is_primary(umo, user_id):
+                st["last_user_at"] = now
+                st["silence_sev"] = 0.0
         except Exception as e:
             logger.debug(f"[affect] note_user 失败: {e}")
 
@@ -6558,7 +6394,7 @@ class AffectCore(_PluginCoreBase):
             poignancy = float(result.get("poignancy") or 3)
         except Exception:
             poignancy = 3.0
-        async with self._lock(umo):
+        async with self._lock():
             await self._apply(umo, delta, kind="turn",
                               note=str(result.get("appraisal") or "")[:60], poignancy=poignancy)
         await self._maybe_reflect(umo)
@@ -6632,7 +6468,7 @@ class AffectCore(_PluginCoreBase):
         if deltas is None:
             # LLM 不可用：把累积的重要度折成一次温和回落，避免 poignancy 无限累积
             deltas = {"p": -0.05, "a": -0.05, "d": 0.0}
-        async with self._lock(umo):
+        async with self._lock():
             await self._apply(umo, deltas, kind="reflection", note="一次情感回望", poignancy=0.0)
             st2 = self.get_state(umo)
             st2["poignancy"] = 0.0
@@ -6646,7 +6482,8 @@ class AffectCore(_PluginCoreBase):
         """角色节奏基线：低于这个沉默时长不算反常（可配置，默认 12 小时）。"""
         return max(30.0, self._cfloat("affect_silence_threshold_minutes", 720.0))
 
-    def silence_severity(self, umo: str, now: float | None = None) -> float:
+    def silence_severity(self, umo: str = "", now: float | None = None) -> float:
+        """全局沉默严重度：以「主要交互对象」最后一次互动为基准（方案一）。"""
         now = float(now if now is not None else time.time())
         st = self.get_state(umo, now)
         last = float(st.get("last_user_at") or now)
@@ -6658,37 +6495,30 @@ class AffectCore(_PluginCoreBase):
         return sev
 
     async def silence_check(self, now: float | None = None) -> dict:
-        """周期性检查「离上次互动多久 vs 角色节奏」，超阈值时注入负面评估事件。"""
+        """周期性检查「主人多久没来 vs 角色节奏」，超阈值时向全局 PAD 注入负面评估。"""
         if not self._on():
             return {"checked": 0, "injected": 0}
         now = float(now if now is not None else time.time())
-        data = self._load()
-        checked = 0
-        injected = 0
+        st = self.get_state("", now)
+        sev = self.silence_severity("", now)
+        if sev <= 0.05:
+            st["silence_sev"] = 0.0
+            return {"checked": 1, "injected": 0}
         cooldown = max(5.0, self._cfloat("affect_silence_cooldown_minutes", 120.0)) * 60.0
-        for sid, st in list((data.get("sessions") or {}).items()):
-            if not isinstance(st, dict):
-                continue
-            umo = st.get("umo") or sid
-            checked += 1
-            sev = self.silence_severity(umo, now)
-            if sev <= 0.05:
-                st["silence_sev"] = 0.0
-                continue
-            ended = self._last_silence_at.get(sid)
-            if ended and now - ended < cooldown:
-                st["silence_sev"] = min(1.0, sev)
-                continue
-            delta = {"p": -0.18 * sev, "a": 0.05 * sev, "d": -0.12 * sev}
-            async with self._lock(umo):
-                await self._apply(umo, delta, kind="silence", note=AFFECT_SILENCE_APPRAISAL, poignancy=8.0)
-                cur = self.get_state(umo, now)
-                cur["silence_sev"] = min(1.0, sev)
-                await self._save()
-            self._last_silence_at[sid] = now
-            injected += 1
-            logger.info(f"[affect] 沉默评估注入负面事件：{sid} 偏离度={sev:.2f}")
-        return {"checked": checked, "injected": injected}
+        ended = self._last_silence_at
+        if ended and now - ended < cooldown:
+            st["silence_sev"] = min(1.0, sev)
+            return {"checked": 1, "injected": 0}
+        delta = {"p": -0.18 * sev, "a": 0.05 * sev, "d": -0.12 * sev}
+        async with self._lock():
+            await self._apply("", delta, kind="silence", note=AFFECT_SILENCE_APPRAISAL, poignancy=8.0)
+            cur = self.get_state("", now)
+            cur["silence_sev"] = min(1.0, sev)
+            await self._save()
+        self._last_silence_at = now
+        baseline = "主要对象" if self._primary_user_id() else "全局静默"
+        logger.info(f"[affect] 沉默评估注入负面事件：全局 偏离度={sev:.2f}（基准={baseline}）")
+        return {"checked": 1, "injected": 1}
 
     # ------------------------------------------------------------- 生成时注入
     @staticmethod
@@ -6698,9 +6528,9 @@ class AffectCore(_PluginCoreBase):
                 return label
         return bands[-1][1]
 
-    def describe(self, umo: str, chars: int = 0) -> str:
-        """把当前 PAD 翻成给生成用的「此刻心情」块（分档词表，非 KNN）。"""
-        if not self._on() or not umo:
+    def describe(self, umo: str = "", chars: int = 0) -> str:
+        """把当前全局 PAD 翻成给生成用的「此刻心情」块（分档词表，非 KNN）。"""
+        if not self._on():
             return ""
         try:
             st = self.get_state(umo)
@@ -6746,21 +6576,21 @@ class AffectCore(_PluginCoreBase):
         return text[:limit] if limit > 0 else text
 
     def status(self) -> dict:
-        data = self._load()
-        sessions = {}
-        for sid, st in (data.get("sessions") or {}).items():
-            if not isinstance(st, dict):
-                continue
-            pad = st.get("pad") or {}
-            sessions[sid] = {
-                "umo": st.get("umo"),
-                "pad": {k: round(float(pad.get(k) or 0.0), 3) for k in AFFECT_PAD_KEYS},
-                "poignancy": round(float(st.get("poignancy") or 0.0), 1),
-                "silence_sev": round(float(st.get("silence_sev") or 0.0), 2),
-                "events": len(st.get("events") or []),
-            }
-        return {"enabled": self._on(), "running": bool(self._sched and getattr(self._sched, "running", False)),
-                "half_life": self._half_life(), "sessions": sessions}
+        st = self.get_state("")
+        pad = st.get("pad") or {}
+        return {
+            "enabled": self._on(),
+            "running": bool(self._sched and getattr(self._sched, "running", False)),
+            "half_life": self._half_life(),
+            "pad": {k: round(float(pad.get(k) or 0.0), 3) for k in AFFECT_PAD_KEYS},
+            "poignancy": round(float(st.get("poignancy") or 0.0), 1),
+            "silence_sev": round(float(st.get("silence_sev") or 0.0), 2),
+            "events": len(st.get("events") or []),
+            "last_user_at": float(st.get("last_user_at") or 0.0),
+            "last_any_at": float(st.get("last_any_at") or 0.0),
+            "primary_user_id": self._primary_user_id(),
+            "file": self._state_file(),
+        }
 
     # ------------------------------------------------------------- 生命周期
     async def _silence_tick(self) -> None:
@@ -6773,16 +6603,11 @@ class AffectCore(_PluginCoreBase):
         if not self._on():
             logger.info("[affect] 情感状态未启用（affect_enabled=false）")
             return
-        data = self._load()
-        guard = getattr(self.owner, "proactive_guard", None)
-        # 首次启动时把已知会话补进来（否则沉默评估没有对象）
+        self._load()
         try:
-            if guard is not None and hasattr(guard, "_collect_target_sessions"):
-                for umo in await guard._collect_target_sessions():
-                    self._entry(umo)
             await self._save()
         except Exception as e:
-            logger.debug(f"[affect] 初始化会话列表失败: {e}")
+            logger.debug(f"[affect] 全局情感状态初始化落盘失败: {e}")
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -6795,8 +6620,10 @@ class AffectCore(_PluginCoreBase):
                 coalesce=True, max_instances=1, misfire_grace_time=300,
             )
             self._sched.start()
-            logger.info(f"[affect] 情感状态已启动（PAD 衰减 T½={self._half_life():.0f} 分钟，"
-                        f"沉默评估每 {mins} 分钟，{len(data.get('sessions') or {})} 个会话）")
+            basis = ("主要对象 " + self._primary_user_id()
+                     if self._primary_user_id() else "全局静默（未配置 affect_primary_user_id）")
+            logger.info(f"[affect] 情感状态已启动（全局单例 PAD，衰减 T½={self._half_life():.0f} 分钟，"
+                        f"沉默评估每 {mins} 分钟，基准：{basis}）")
         except Exception as e:
             self._sched = None
             logger.warning(f"[affect] 沉默评估调度启动失败（情感状态其余功能仍可用）: {e}")
@@ -8486,7 +8313,11 @@ class ElainaSuitePlugin(Star):
         """门禁：记录会话最近活跃时间（不产生任何回复）。"""
         await self.proactive_guard._on_user_message(event)
         await self.living_memory.on_user_message(event)
-        self.affect.note_user(event.unified_msg_origin)
+        try:
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:
+            sender_id = ""
+        self.affect.note_user(event.unified_msg_origin, user_id=sender_id)
 
     # ------------------------------------------------------------------ #
     # LLM 钩子路由
@@ -8630,24 +8461,22 @@ class ElainaSuitePlugin(Star):
     async def affect_status_cmd(self, event: AstrMessageEvent):
         """查看情感状态：PAD 三维、poignancy 累计、沉默严重度、最近情感事件。"""
         st = self.affect.status()
+        pad = st.get("pad") or {}
         lines = [
-            "情感状态（阶段三 · Sentipolis PAD）：",
+            "情感状态（全局唯一 · Sentipolis PAD）：",
             "  启用：{}".format("是" if st.get("enabled") else "否"),
             "  沉默评估：{}".format("运行中" if st.get("running") else "未运行"),
             "  衰减半衰期：{:.0f} 分钟".format(float(st.get("half_life") or 0)),
+            "  愉悦{:+.2f} / 唤醒{:+.2f} / 掌控{:+.2f}".format(
+                float(pad.get("p") or 0), float(pad.get("a") or 0), float(pad.get("d") or 0)),
+            "  poignancy {:.1f}；沉默严重度 {:.2f}；情感事件 {} 条".format(
+                float(st.get("poignancy") or 0), float(st.get("silence_sev") or 0),
+                int(st.get("events") or 0)),
+            "  沉默基准：{}".format(
+                ("主要对象 " + str(st.get("primary_user_id") or ""))
+                if st.get("primary_user_id") else "全局静默（未配置 affect_primary_user_id）"),
+            "  状态文件：{}".format(st.get("file") or "-"),
         ]
-        sessions = st.get("sessions") or {}
-        if not sessions:
-            lines.append("  会话：无（还没开始记录）")
-        for sid, info in sessions.items():
-            pad = info.get("pad") or {}
-            lines.append(
-                "  [{}] 愉悦{:+.2f} / 唤醒{:+.2f} / 掌控{:+.2f}；poignancy {:.1f}；沉默严重度 {:.2f}；事件 {} 条".format(
-                    str(sid)[:24], float(pad.get("p") or 0), float(pad.get("a") or 0),
-                    float(pad.get("d") or 0), float(info.get("poignancy") or 0),
-                    float(info.get("silence_sev") or 0), int(info.get("events") or 0),
-                )
-            )
         yield event.plain_result(chr(10).join(lines))
     @filter.command("记忆状态", alias={"长期记忆状态"})
     async def memory_status_cmd(self, event: AstrMessageEvent):
