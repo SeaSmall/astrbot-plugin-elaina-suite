@@ -92,14 +92,28 @@ DEFAULT_RECOGNITION_WAIT = 30  # 用户提问时等待图片识别完成的最�
 # 中国节点 https://token-plan-cn.xiaomimimo.com/v1；新加坡 token-plan-sgp / 欧洲 token-plan-ams
 DEFAULT_XIAOMI_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 # MiMo-V2.6 系列（2026-09-22 发布）：mimo-v2.6-pro / mimo-v2.6-flash / mimo-v2.6-pro-ultraspeed
-# 识图用 flash 性价比最高（全模态、支持图片理解）；mimo-v2.5 / mimo-v2.5-pro 将于
-# 2026-10-21 下线，故默认改用 2.6。模型名不可用时会按 XIAOMI_MODEL_FALLBACKS 自动降级。
+# 识图用 flash 性价比最高（全模态、支持图片理解）。mimo-v2.5 / mimo-v2.5-pro 已于
+# 2026-10-21 下线，不再作为降级候选；旧配置里残留的 2.5 模型名由 _normalize_xiaomi_model()
+# 自动迁到 2.6，避免升级后识图直接 404。
 DEFAULT_XIAOMI_MODEL = "mimo-v2.6-flash"
 XIAOMI_MODEL_FALLBACKS: tuple[str, ...] = (
     "mimo-v2.6-flash",
     "mimo-v2.6-pro",
-    "mimo-v2.5",
+    "mimo-v2.6-pro-ultraspeed",
 )
+# 已下线的小米模型名（2026-10-21 起不再可用）→ 现行替代模型
+XIAOMI_RETIRED_MODELS: dict[str, str] = {
+    "mimo-v2.5": "mimo-v2.6-flash",
+    "mimo-v2.5-pro": "mimo-v2.6-pro",
+    "mimo-v2.5-pro-ultraspeed": "mimo-v2.6-pro-ultraspeed",
+    "mimo-v2.5-flash": "mimo-v2.6-flash",
+}
+
+
+def _normalize_xiaomi_model(name: str) -> str:
+    """把已下线的 MiMo 2.5 模型名换成对应的 2.6 模型（未知名字原样返回）。"""
+    key = str(name or "").strip().lower()
+    return XIAOMI_RETIRED_MODELS.get(key, str(name or "").strip())
 # 百度智能云图像识别（通用物体和场景识别 advanced_general）
 DEFAULT_BAIDU_TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
 DEFAULT_BAIDU_API_URL = "https://aip.baidubce.com/rest/2.0/image-classify/v2/advanced_general"
@@ -1011,6 +1025,10 @@ class ImageBridgeCore(_PluginCoreBase):
             self._cfg("xiaomi_base_url", DEFAULT_XIAOMI_BASE_URL) or DEFAULT_XIAOMI_BASE_URL
         ).rstrip("/")
         model = str(self._cfg("xiaomi_model", DEFAULT_XIAOMI_MODEL) or DEFAULT_XIAOMI_MODEL).strip()
+        _model_fixed = _normalize_xiaomi_model(model)
+        if _model_fixed != model:
+            logger.info(f"[image_bridge] 配置的 MiMo 模型 {model} 已下线，改用 {_model_fixed}")
+            model = _model_fixed
         timeout = int(self._cfg("ocr_timeout", DEFAULT_OCR_TIMEOUT) or DEFAULT_OCR_TIMEOUT)
         if not api_key:
             raise RuntimeError("未配置小米 API Key（xiaomi_api_key）")

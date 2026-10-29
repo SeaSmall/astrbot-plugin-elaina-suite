@@ -408,9 +408,34 @@ async def main():
             raise AssertionError("401 应抛异常")
         except RuntimeError as e:
             assert "401" in str(e), e
+        # 15c) 已下线的 MiMo 2.5 模型名自动迁到 2.6（2026-10-21 下线）
+        assert mod._normalize_xiaomi_model("mimo-v2.5") == "mimo-v2.6-flash"
+        assert mod._normalize_xiaomi_model(" mimo-v2.5-pro ") == "mimo-v2.6-pro"
+        assert mod._normalize_xiaomi_model("mimo-v2.6-flash") == "mimo-v2.6-flash"
+        assert "mimo-v2.5" not in mod.XIAOMI_MODEL_FALLBACKS, mod.XIAOMI_MODEL_FALLBACKS
+        # 旧配置里写 2.5 时，实际请求应换成 2.6
+        pl.config["xiaomi_model"] = "mimo-v2.5"
+        seen = []
+        script[:] = [
+            _Resp(200, "", {"choices": [{"message": {"content": "图里是一只猫"}}]}),
+        ]
+        _orig_post = _Client.post
+
+        async def _capture(self, url, json=None, headers=None):
+            seen.append(json.get("model"))
+            return script.pop(0)
+
+        _Client.post = _capture
+        try:
+            out = await ib._recognize_xiaomi(b"\x89PNG\r\n\x1a\n" + b"x" * 20, "png", "image/png")
+        finally:
+            _Client.post = _orig_post
+        assert out == "图里是一只猫", out
+        assert seen and seen[0] == "mimo-v2.6-flash", seen
+        pl.config["xiaomi_model"] = "mimo-v2.6-flash"
     finally:
         mod.httpx = orig_httpx
-    print("[15] MiMo 2.6 默认 + 模型名自动降级 OK")
+    print("[15] MiMo 2.6 默认 + 模型名自动降级 + 2.5 旧名迁移 OK")
 
     # 17) 日报：政府官网政策源 + 图片/文件「两份都给」发送链路
     dd = pl.daily_digest

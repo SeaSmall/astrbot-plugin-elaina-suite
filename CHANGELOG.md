@@ -782,3 +782,21 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 ### ⬆️ 升级注意
 
 - 服务器配置需同时满足：`mem0_infer=false`、`mem0_distill=true`（若之前为排查打开过 `mem0_infer`，务必关掉）。
+
+## v1.10.2（2026-10-29）
+
+### 🔧 MiMo 2.5 全面下线：降级链与旧配置迁移
+
+- 小米 `mimo-v2.5` / `mimo-v2.5-pro` 已于 2026-10-21 下线，`XIAOMI_MODEL_FALLBACKS` 里仍留着
+  `mimo-v2.5` 作为兜底，命中时会再吃一次 404/400。
+- 降级链改为纯 2.6：`mimo-v2.6-flash` → `mimo-v2.6-pro` → `mimo-v2.6-pro-ultraspeed`。
+- 新增 `XIAOMI_RETIRED_MODELS` + `_normalize_xiaomi_model()`：配置里残留的旧名字在请求前自动映射
+  （`mimo-v2.5` → `mimo-v2.6-flash`、`mimo-v2.5-pro` → `mimo-v2.6-pro`、
+  `mimo-v2.5-pro-ultraspeed` → `mimo-v2.6-pro-ultraspeed`），并记一条
+  `[image_bridge] 配置的 MiMo 模型 … 已下线，改用 …` 日志。
+- `_conf_schema.json` 的 `xiaomi_model` 提示与 README 同步改写（不再写「将于下线」，改为「已下线 + 自动迁移」）。
+
+### 🧪 测试
+
+- `tests/test_merged.py` [15] 增加 15c：旧名映射三分支 + `XIAOMI_MODEL_FALLBACKS` 不含 2.5 +
+  配置写 `mimo-v2.5` 时**实际请求体里的 model 为 `mimo-v2.6-flash`**。
