@@ -23,8 +23,8 @@ mod._plugin_data_dir = lambda: TMP
 GLOBAL = os.path.join(TMP, "global_affect.json")
 LEGACY = os.path.join(TMP, "affect_state.json")
 
-QQ = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
-PHONE = "webchat_phone!alice!main"
+QQ = "default_10001:FriendMessage:openid_test"
+PHONE = "webchat_phone!testuser!main"
 
 
 class FakeGuard:
@@ -116,10 +116,10 @@ async def g3_migrate_preferred_shared():
             "umo": PHONE}
     clean()
     io.open(LEGACY, "w", encoding="utf-8").write(json.dumps(
-        {"version": 1, "sessions": {"shared_alice": slow, "other": fast}},
+        {"version": 1, "sessions": {"shared_testuser": slow, "other": fast}},
         ensure_ascii=False))
     cfg = dict(BASE)
-    cfg.update({"shared_scope_enabled": True, "shared_scope_id": "alice"})
+    cfg.update({"shared_scope_enabled": True, "shared_scope_id": "testuser"})
     core = mod.AffectCore(FakeOwner(cfg))
     st = core.get_state("")
     assert abs(st["pad"]["p"] - 0.1) < 1e-6, "优先取 shared_<id> 那条（而非时间最新的）"
@@ -168,9 +168,9 @@ async def g5_primary_user_silence_basis():
     core2.note_user(QQ)
     assert float(core2._load()["last_user_at"]) > now - 5, "方案二下任意互动都算在场"
     # 多标识：同一个人跨渠道（QQ openid + webchat 用户名）都要能算主要对象
-    core3 = make(affect_primary_user_id="0123456789ABCDEF0123456789ABCDEF, alice")
+    core3 = make(affect_primary_user_id="openid_test, testuser")
     assert core3._is_primary(QQ) is True, "QQ umo 里的 openid 应命中"
-    assert core3._is_primary(PHONE, user_id="alice") is True, "webchat 用户名应命中"
+    assert core3._is_primary(PHONE, user_id="testuser") is True, "webchat 用户名应命中"
     assert core3._is_primary("webchat_phone!other!main", user_id="other") is False
     st3 = core3._load()
     st3["last_user_at"] = now - 3600
@@ -179,7 +179,7 @@ async def g5_primary_user_silence_basis():
     st3 = core3._load()
     assert abs(float(st3["last_user_at"]) - (now - 3600)) < 5, "多标识下陌生人不得重置计时"
     assert abs(float(st3["silence_sev"]) - 0.7) < 1e-6
-    core3.note_user(PHONE, user_id="alice")
+    core3.note_user(PHONE, user_id="testuser")
     assert float(core3._load()["last_user_at"]) > now - 5, "多标识下主要对象出现必须重置计时"
     print("[G5] 沉默基准方案一：只有主要对象能重置计时（支持多标识跨渠道）；未配置时退化为方案二 OK")
 

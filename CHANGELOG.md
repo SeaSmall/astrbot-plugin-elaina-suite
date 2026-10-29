@@ -712,7 +712,7 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 - **新增单一源接口**：`list_memories()` / `memory_text()` / `flush_now()` / `reset_scope()` /
   `migrate_scopes()` / `watermark()`，外加 `<data>/mem0_meta.json` 记录 `last_write_at` / `seeded_at` / `writes`。
 - **旧 scope 自动合并**：启动时把散落在其它 `user_id` 下的 Mem0 条目并入唯一 scope（写入带
-  `metadata.migrated_from`，再删旧 scope），日志 `[memory] 旧 scope 已合并：X → u_alice（N 条）`；
+  `metadata.migrated_from`，再删旧 scope），日志 `[memory] 旧 scope 已合并：X → u_<scope>（N 条）`；
   开关 `mem0_migrate_legacy`（默认开，幂等）。
 - **命令直查 Mem0**：`/记忆` 列出 `list_memories()`（worldview 标 ◆）；`/刷新记忆` → `flush_now()`；
   `/记忆重置` → `reset_scope()` + 重播世界观。
@@ -742,7 +742,7 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 ## v1.9.0（2026-10-28）
 
 ### 问题
-- 记忆与情感状态都按「会话 UMO」分桶：本机语音通道（`webchat_phone!alice!main`）与 QQ 主会话
+- 记忆与情感状态都按「会话 UMO」分桶：本机语音通道（`webchat_phone!<user>!main`）与 QQ 主会话
   是两份互不相通的记忆、两套 PAD。实测同一句话在语音里说完，QQ 会话的 PAD 仍是基线 0.15/0.25/0.70，
   记忆写入也落在 `u_webchat_...` 命名空间里 —— 等于"她在电话里认识的那个人"和"QQ 里认识的那个人"不是同一个。
 - 语音会话因为用户说话被 `_living_on_user_message` 排上了主动消息决策，但该会话没有常驻监听方，

@@ -20,7 +20,7 @@
 
 ## 1. 环境与方法
 
-- NAS `192.168.1.10`，容器 `astrbot`（`docker exec` 以 root 操作）。
+- NAS 内网主机，容器 `astrbot`（`docker exec` 以 root 操作）。
 - 容器：Python 3.12.14、pip 26.2.1；**CPU `AMD G-T40N Processor`，nproc=2**，`/proc/cpuinfo` 的 flags 里 **没有 avx / avx2 / sse4_2**。
 - 访问链路：Windows → `D:\deepseek\_scratch\sshx.py`（paramiko，走 Clash 的 HTTP CONNECT `127.0.0.1:7897`，订阅须是「家里NAS SeaVPN」）→ NAS `sudo` → `docker exec`。
 - 计时口径：NAS 宿主是 busybox，`date +%s%3N` 不支持，**秒级用 `date +%s`，毫秒级在容器内用 `time.time()`**。

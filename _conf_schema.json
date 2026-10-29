@@ -653,7 +653,7 @@
   },
   "shared_scope_id": {
     "type": "string",
-    "description": "共享作用域 id（共享开启后生效）：所有会话都归一成这个 id，例如填 alice。留空则用 shared",
+    "description": "共享作用域 id（共享开启后生效）：所有会话都归一成这个 id，例如填 testuser。留空则用 shared",
     "default": ""
   },
   "tsundere_enabled": {

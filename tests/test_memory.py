@@ -202,7 +202,7 @@ async def m3_search_contract():
     assert kind == "search" and query == "布丁是谁"
     assert kw.get("filters") == {"user_id": "u_owner"}, kw
     # 不论从哪个会话发起，永远只查唯一 scope
-    await e.search("布丁是谁", "webchat_phone!alice!main")
+    await e.search("布丁是谁", "webchat_phone!testuser!main")
     assert mem.calls[-1][2]["filters"]["user_id"] == "u_owner"
     assert "user_id" not in kw, "顶层 user_id 会被 mem0 拒绝"
     assert kw.get("top_k") == 4
@@ -362,15 +362,15 @@ async def m13_affect_wiring():
 
 async def m14_single_scope():
     """记忆源归一：不管会话、不管共享开关，全插件只有一个 mem0 scope。"""
-    qq = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
-    phone = "webchat_phone!alice!main"
-    e = make_engine(shared_scope_enabled=True, shared_scope_id="alice")
-    assert e._uid(qq) == e._uid(phone) == e._uid("") == "u_alice", e._uid("")
-    assert e.scope_id() == "u_alice"
+    qq = "default_10001:FriendMessage:openid_test"
+    phone = "webchat_phone!testuser!main"
+    e = make_engine(shared_scope_enabled=True, shared_scope_id="testuser")
+    assert e._uid(qq) == e._uid(phone) == e._uid("") == "u_testuser", e._uid("")
+    assert e.scope_id() == "u_testuser"
     await e.search("布丁", qq)
     await e.search("布丁", phone)
     calls = [c for c in FakeMemory.instances[0].calls if c[0] == "search"]
-    assert {c[2]["filters"]["user_id"] for c in calls} == {"u_alice"}
+    assert {c[2]["filters"]["user_id"] for c in calls} == {"u_testuser"}
     # 关闭共享开关也仍然只有一个 scope（回退 owner），不再按会话隔离
     off = make_engine()
     assert off._uid(qq) == off._uid(phone) == "u_owner"

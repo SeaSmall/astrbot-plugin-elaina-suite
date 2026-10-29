@@ -14,11 +14,11 @@
 | --- | --- | --- |
 | 状态文件 | `<插件数据目录>/affect_state.json` | `_state_file()` main.py:6315 |
 | 文件结构 | `{"version":1, "sessions":{<sid>:{umo, pad, baseline, updated, poignancy, events, silence_sev, last_user_at}}}` | `_load()` main.py:6334、`_entry()` main.py:6451 |
-| 分区键 | `_sid(umo)`：开启 `shared_scope_enabled` 时返回 `"shared_"+shared_scope_id`（服务器当前 `shared_alice`），否则按 `umo` 清洗截断 | `_sid()` main.py:6319 |
+| 分区键 | `_sid(umo)`：开启 `shared_scope_enabled` 时返回 `"shared_"+shared_scope_id`（服务器当前 `shared_<scope>`），否则按 `umo` 清洗截断 | `_sid()` main.py:6319 |
 | 锁 | 每个 sid 一把 `asyncio.Lock`（`_locks` main.py:6277） | `_lock()` main.py:6326 |
 | 落盘 | `.part` + `os.replace` 原子写 | `_save()` main.py:6353 |
 
-**判定：`shared_scope` 只是把 N 个会话重命名成 1 个 key，数据模型仍是 `sessions: {sid: 状态}`；真机 `affect_state.json` 里同时残留旧会话 key（`default_1000000001_FriendMessage_0123456789ABCDEF0123456789ABCDEF`）与 `shared_alice`。不符合「全局唯一、无分区键」。**
+**判定：`shared_scope` 只是把 N 个会话重命名成 1 个 key，数据模型仍是 `sessions: {sid: 状态}`；真机 `affect_state.json` 里同时残留旧会话 key（`default_<qq>_FriendMessage_<openid>`）与 `shared_<scope>`。不符合「全局唯一、无分区键」。**
 
 ### A2 读点（全部经 `get_state()` main.py:6468 / `_entry()` main.py:6451）
 
@@ -76,7 +76,7 @@
 | 写入 | `on_user_message` main.py:6113 缓冲 → `on_llm_response` main.py:6128 每 `mem0_flush_turns`(4) 轮 → `_write` main.py:6149 → `mem.add(..., user_id=_uid(umo), infer=mem0_infer)` |
 | 种子 | `seed_worldview()` main.py:6064 → `assets/worldview.json` 的 facts 写入 `user_id="elaina_world"`（34 条） |
 | 读取 | `recall_block` main.py:6038 ← `search` main.py:6011 ← `_living_memory_block` main.py:5247；`rerank_affect` main.py:5975 情感重排 |
-| scope | `_uid(umo)` main.py:5827 = `"u_"+_sid(umo)`；`_sid` main.py:5821（受 `shared_scope` 影响）→ 当前 `u_shared_alice`；世界观固定 `elaina_world` |
+| scope | `_uid(umo)` main.py:5827 = `"u_"+_sid(umo)`；`_sid` main.py:5821（受 `shared_scope` 影响）→ 当前 `u_shared_<scope>`；世界观固定 `elaina_world` |
 
 ### B3 原始历史回退
 
@@ -100,7 +100,7 @@
 
 1. **沉默基准 = 方案一（主要交互对象）**：新增配置 `affect_primary_user_id`（空 = 回退方案二：全局最后一次任意交互）。沉默评估只针对主要对象；其他会话交互更新 PAD 但不重置该计时。
    - 理由：单主人格部署（QQ + 语音两条通道同属一个人）；主人格的「被忽视感」必须绑定主人，方案二语义太弱。
-2. **Mem0 scope 归一**：`user_id` 固定为 `shared_scope_id`（服务器 `alice`），不再按 `umo` 派生；`agent_id` 留空（单人格不额外分区）。世界观事实迁进同一 scope，用 `metadata={"kind":"worldview"}` 标记；展示时按 kind 分组。
+2. **Mem0 scope 归一**：`user_id` 固定为 `shared_scope_id`（服务器 `<user>`），不再按 `umo` 派生；`agent_id` 留空（单人格不额外分区）。世界观事实迁进同一 scope，用 `metadata={"kind":"worldview"}` 标记；展示时按 kind 分组。
    - 理由：spec 要求「全插件只读写这一个 scope，不得混用多个 scope 导致记忆分裂」；单用户部署固定单一 `user_id` 是被允许的简化。
 3. **KV `memory_store` 与 `workspaces/*/user_profile.md`**：迁移内容进 Mem0 后**停止读写**（代码路径删除，或在文档声明废弃并默认关闭），`/记忆` 改为直查 Mem0；迁移后 `memory_enabled` / `memory_notes_enabled` 相关键标记废弃，避免第二记忆源复活。
-4. **情感文件**：`affect_state.json` → `global_affect.json`，结构从 `{"sessions":{...}}` 变为单对象 `{pad, baseline, updated, poignancy, events, silence_sev, last_user_at, version}`；迁移取**最近一次更新值**（`shared_alice` 优先，缺失则取 mtime 最新会话），并在日志与文档写明。
+4. **情感文件**：`affect_state.json` → `global_affect.json`，结构从 `{"sessions":{...}}` 变为单对象 `{pad, baseline, updated, poignancy, events, silence_sev, last_user_at, version}`；迁移取**最近一次更新值**（`shared_<scope>` 优先，缺失则取 mtime 最新会话），并在日志与文档写明。

@@ -1,6 +1,6 @@
 # 阶段零-B · 服务器侧彻查清单（只读）
 
-- 检查对象：NAS 服务器 `ssh.example.com:22`（用户 `alice`）上的 AstrBot 容器 **`astrbot`**
+- 检查对象：NAS 服务器 服务器（已脱敏）上的 AstrBot 容器 **`astrbot`**
 - 数据根：宿主 `/opt/astrbot/data`（容器内 `/AstrBot/data`）
 - 检查时间：**2026-10-29 18:2x–18:4x（CST）**，宿主 UTC 基准 `2026-10-29T10:29:30Z`
 - 检查方式：全程**只读**。未执行任何 `rm` / `mv` / `docker stop|restart` / 改配置 / 改数据库。sqlite 一律 `cp` 到 `/tmp` 后查副本（`data_v4.db` 在容器运行中，绝不直连）。
@@ -41,7 +41,7 @@ cd /opt/astrbot/data/plugins && ls -la
 
 | 条目 | 类型 | 大小 | mtime(UTC) | 归属 |
 | --- | --- | --- | --- | --- |
-| `astrbot_plugin_affection` | 目录 `drwx------ alice` | 内容 68K | 2026-08-26 03:34 | 第三方 middcom/dream/deepseek |
+| `astrbot_plugin_affection` | 目录 `drwx------ <user>` | 内容 68K | 2026-08-26 03:34 | 第三方 middcom/dream/deepseek |
 | `astrbot_plugin_elaina_suite` | 目录 `drwxr-xr-x root` | 含 `meme/` 约 50 个素材 | 2026-10-28 13:37 | 本插件 SeaSmall |
 | `astrbot_plugin_gif_vision_helper.zip` | **zip 文件** | 39 971 B | 2026-08-25 06:06 | 第三方 YanL & _Se14m |
 | `astrbot_plugin_password` | 目录 | — | 2026-08-25 06:05 | 第三方 Zhalslar |
@@ -146,7 +146,7 @@ sudo ls -laR /opt/astrbot/data/plugin_data/astrbot_plugin_affection   # 合计 6
 
 | bot_id 子目录 | self_data.json | user_data.json | user_data mtime(UTC) | 用户数 |
 | --- | --- | --- | --- | --- |
-| `1000000003` | 219 B | 1 034 B | 2026-08-09 08:17 | 3 |
+| `<qq3>` | 219 B | 1 034 B | 2026-08-09 08:17 | 3 |
 | `541E6A92A03718EDBB9946C748642854` | 195 B | 735 B | 2026-09-13 01:02 | 2 |
 | `default_bot` | —（空目录） | — | 2026-08-07 14:52 | 0 |
 | `qq_official` | 220 B | 762 B | 2026-09-29 23:54 | 2 |
@@ -156,9 +156,9 @@ sudo ls -laR /opt/astrbot/data/plugin_data/astrbot_plugin_affection   # 合计 6
 内容抽样（`user_data.json`，键=发送者 id；数值取自文件）：
 
 ```
-unknown_selfid: 0123456789ABCDEF0123456789ABCDEF → affection=100.0, libido_other=32.1, aggression_other=20.3, last_interaction=1793268188.7（≈2026-10-29T10:03Z）
-webchat:       alice                            → affection=53.0, libido_other=27.4, aggression_other=24.0
-1000000003:    0123456789ABCDEF… / 1000000002              → affection=100.0 / 50.0
+unknown_selfid: <openid> → affection=100.0, libido_other=32.1, aggression_other=20.3, last_interaction=1793268188.7（≈2026-10-29T10:03Z）
+webchat:       <user>                            → affection=53.0, libido_other=27.4, aggression_other=24.0
+<qq3>:    <openid>… / <qq2>              → affection=100.0 / 50.0
 ```
 
 > **重要**：`unknown_selfid` 的写入时间 ≈ 审计开始前 2 分钟 → **affection 此刻仍在正常跑并写状态**，不是死插件。它的 `inject_emotion_prompt` 无开关，每轮主 LLM 请求都会把「好感度 100/100、力比多/攻击性」面板塞进 system_prompt。
@@ -222,7 +222,7 @@ personas            webchat_threads
 
 ```json
 {"val": {"updated": "2026-10-29 15:52",
-         "items": [{"umo": "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF",
+         "items": [{"umo": "default_<qq>:FriendMessage:<openid>",
                     "summary": "用户是吉林工程技术师范学院大一学生，家乡安徽宿州，住宿。军训已于 2026-10-21 结束……万事达卡已于 2026-10-17 在城里领回。用户习惯晚睡……用户昵称助手为\"伊蕾娜\"……"}]}}
 ```
 
@@ -266,9 +266,9 @@ CREATE TABLE messages (...);
 
 | 路径 | 大小 | mtime(UTC) | 内容/条目数 |
 | --- | --- | --- | --- |
-| `/opt/astrbot/data/affect_state.json` | **2 038 B** | **2026-10-29 10:03** | 套件情感状态（**仍是旧 `sessions` 结构**：`{"sessions":{"<umo清洗键>":{...},"shared_alice":{...}}}`），同时残留旧会话 key 与 `shared_alice` |
+| `/opt/astrbot/data/affect_state.json` | **2 038 B** | **2026-10-29 10:03** | 套件情感状态（**仍是旧 `sessions` 结构**：`{"sessions":{"<umo清洗键>":{...},"shared_<scope>":{...}}}`），同时残留旧会话 key 与 `shared_<scope>` |
 | `/opt/astrbot/data/affect_state.json.bak` | 1 710 B | 2026-10-28 23:46 | 上一版备份 |
-| `/opt/astrbot/data/motivation_state.json` | 6 176 B | 2026-10-29 10:03 | 动机状态（`sessions.shared_alice.topics`，记有 `（原句已脱敏）` 等话题） |
+| `/opt/astrbot/data/motivation_state.json` | 6 176 B | 2026-10-29 10:03 | 动机状态（`sessions.shared_<scope>.topics`，记有 `（原句已脱敏）` 等话题） |
 | `/opt/astrbot/data/proactive_state.json` | 5 422 B | 2026-10-29 10:03 | 主动消息门禁状态（`{"version":2,"sessions":{...}}`） |
 | `/opt/astrbot/data/memory_store_backup_20261018_080835.json` | 10 510 B | 2026-10-18 00:08 | 旧 KV `memory_store` 手工备份（`{"val":{"updated":"2026-10-18 03:01","items":[...]}}`） |
 | `/opt/astrbot/data/_clear_bak_20261028-131545/` | **9.6 M，14 项** | 2026-10-28 13:15 | `affect_state.json`(381B)、`motivation_state.json`(3845B)、`proactive_state.json`(2239B)、`data_v4.db`(9 728 000B)、`mem0_history.db`(32768B)、`mem0_qdrant/{.lock, meta.json 1199B, collection/elaina_memories/storage.sqlite 221184B, collection/mem0_probe/storage.sqlite 40960B}` |
@@ -279,10 +279,10 @@ CREATE TABLE messages (...);
 | `/opt/astrbot/data/skills.json` | 1 957 B | — | 各 skill 的 `{"active": true}` 开关 |
 | `/opt/astrbot/data/fastembed_cache/` | **91 M**（5 子项） | 2026-10-28 11:13 | mem0 本地嵌入模型缓存（bge-small-zh-v1.5） |
 | `/opt/astrbot/data/workspaces/` | 12 M，**4 个目录** | — | 见下 |
-| └ `default_1000000001_FriendMessage_0123456789ABCDEF0123456789ABCDEF/` | **31 项** | — | `user_profile.md`(455B)、`timetable.md`、`morning_report.md`、`project_README.md`、`data/cmd_config.json`、`data/t2i_templates`、大量 `crop_*/seg_*/tag_*/t_*/u_*/m_*.png` |
-| └ `webchat_FriendMessage_webchat_alice_webchat_phone_alice_main/` | — | — | webchat 会话工作区 |
-| └ `default_1000000001_GroupMessage_FEDCBA9876543210FEDCBA9876543210/` | — | — | 群会话工作区 |
-| └ `_1_FriendMessage_1000000002/` | — | — | 另一会话 |
+| └ `default_<qq>_FriendMessage_<openid>/` | **31 项** | — | `user_profile.md`(455B)、`timetable.md`、`morning_report.md`、`project_README.md`、`data/cmd_config.json`、`data/t2i_templates`、大量 `crop_*/seg_*/tag_*/t_*/u_*/m_*.png` |
+| └ `webchat_FriendMessage_webchat_<user>_webchat_phone_<user>_main/` | — | — | webchat 会话工作区 |
+| └ `default_<qq>_GroupMessage_<group_openid>/` | — | — | 群会话工作区 |
+| └ `_1_FriendMessage_<qq2>/` | — | — | 另一会话 |
 | `/opt/astrbot/data/plugins/astrbot_plugin_elaina_suite/assets/persona.json` | 46 016 B | 2026-10-28 10:34 | 顶层键 `schema_version, kind, generated_at, generated_by, runtime_policy, name, display_name, title, aliases, identity, traits, tone, speech_habits, tsundere, emotional_tendencies, silence_reaction, relationship, prohibitions, source_index, source_map`（**人格底稿，被注入 system prompt**） |
 | `/opt/astrbot/data/plugin_data/astrbot_plugin_affection/` | 68 K，6 个 bot_id 子目录 | 2026-10-29 10:32（最新写） | 见 §2.2 |
 | `/opt/astrbot/data/font.ttf` | 17 773 244 B | 2026-10-25 | 插件补的中文字体（容器 `fc-list :lang=zh` = 0） |
@@ -317,7 +317,7 @@ mem0_recall_chars: 1200, mem0_infer: false
 affect_enabled: true, affect_fast_mode: "heuristic", affect_decay_half_life_minutes: 120,
 affect_silence_threshold_minutes: 720, affect_inject_chars: 600
 motivation_enabled: true, motivation_affect_gate: true, motivation_learning_gate: true
-persona_inject_enabled: true, shared_scope_enabled: true, shared_scope_id: "alice",
+persona_inject_enabled: true, shared_scope_enabled: true, shared_scope_id: "testuser",
 tsundere_enabled: true, tsundere_review_enabled: true, tsundere_chat_inject: true,
 meme_enabled: true, meme_probability: 0.5, guard_enabled: true
 ```
@@ -373,7 +373,7 @@ cd /opt/astrbot/data/plugins && grep -rn "astrbot_plugin_" astrbot_plugin_elaina
 
 | # | 路径 | 证据 | 风险 | 建议动作 |
 | --- | --- | --- | --- | --- |
-| A1 | `/opt/astrbot/data/plugin_data/astrbot_plugin_affection/`（68K，6 个 bot_id 子目录、10 个 JSON） | affection 插件状态；今天 10:32 UTC 仍在写；`0123456789ABCDEF…` 好感度已封顶 100.0；与套件 PAD 双情感并行注入 | 中：这是**另一套情感系统的全部历史**；若用户还要 affection 的 `/mystatus`、`/reset_emotion`，删了即归零 | 先确认 affection 停用（C1），再把整个目录归档后删除；**不要在插件仍加载时删**（内存态会重写） |
+| A1 | `/opt/astrbot/data/plugin_data/astrbot_plugin_affection/`（68K，6 个 bot_id 子目录、10 个 JSON） | affection 插件状态；今天 10:32 UTC 仍在写；`<openid>…` 好感度已封顶 100.0；与套件 PAD 双情感并行注入 | 中：这是**另一套情感系统的全部历史**；若用户还要 affection 的 `/mystatus`、`/reset_emotion`，删了即归零 | 先确认 affection 停用（C1），再把整个目录归档后删除；**不要在插件仍加载时删**（内存态会重写） |
 | A2 | `/opt/astrbot/data/_clear_bak_20261028-131545/`（9.6M，14 项） | 名字即「清空操作前的备份」，内含旧 affect_state/motivation/proactive/data_v4.db/mem0_qdrant | 低：10-28 之后已有新数据；但它是唯一回滚点 | 确认无需回滚后整目录删除（或移到宿主离线备份） |
 | A3 | `/opt/astrbot/data/_skill_bak_20261028-133600/`（38M） | `elaina-agent` skill 备份：`memory/index.sqlite3` 27.8M + `persona-evidence.md` 440K + `小说/` 8M + `文章概括/` 2M；线上 `skills/elaina-agent` 已删除 | 中：这是**人格/世界观 RAG 素材**（小说原文+索引），不是用户记忆；删了要重建索引（耗时/需重抓原文） | 归档到宿主离线存储后删除；若用户还想恢复 elaina-agent skill 则保留（C6） |
 | A4 | `/opt/astrbot/data/memory_store_backup_20261018_080835.json`（10.5K） | 旧 KV `memory_store` 手工备份，`updated=2026-10-18 03:01` | 低：内容与 `preferences.memory_store` 同源且更旧 | 迁移进 mem0 并确认 KV 停写后删除 |

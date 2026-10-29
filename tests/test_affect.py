@@ -310,8 +310,8 @@ async def a14_core_enabled_helper():
 
 async def a15_global_single():
     """阶段七：情感状态全局唯一，不再有按会话/用户的分区。"""
-    QQ = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
-    PHONE = "webchat_phone!alice!main"
+    QQ = "default_10001:FriendMessage:openid_test"
+    PHONE = "webchat_phone!testuser!main"
     core = make_core()
     assert not hasattr(core, "_sid"), "全局单例后不应再持有 _sid 分区函数"
     await core.fast_update(QQ, "你真是太厉害了，好棒，太强了", "哼，这不是当然的吗")

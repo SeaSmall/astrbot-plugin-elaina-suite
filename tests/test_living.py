@@ -423,7 +423,7 @@ async def t13_skip_non_target_session():
     """非目标会话（如语音通道）不排主动消息：避免往没人收的会话白发。"""
     core = make_core()
     await core.initialize()
-    other = "webchat_phone!alice!main"
+    other = "webchat_phone!testuser!main"
     await core._living_decide(other)
     state = await core._living_load()
     assert other not in (state.get("sessions") or {}), state.get("sessions")

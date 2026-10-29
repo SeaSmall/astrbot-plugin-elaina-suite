@@ -237,15 +237,15 @@ async def n10_schema():
 
 async def n11_shared_scope():
     """跨会话共享作用域：QQ 与语音通道共用同一份话题/学习进度（默认关闭时各一份）。"""
-    QQ = "default_1000000001:FriendMessage:0123456789ABCDEF0123456789ABCDEF"
-    PHONE = "webchat_phone!alice!main"
-    core = make_core(shared_scope_enabled=True, shared_scope_id="alice")
-    assert core._sid(QQ) == core._sid(PHONE) == "shared_alice"
+    QQ = "default_10001:FriendMessage:openid_test"
+    PHONE = "webchat_phone!testuser!main"
+    core = make_core(shared_scope_enabled=True, shared_scope_id="testuser")
+    assert core._sid(QQ) == core._sid(PHONE) == "shared_testuser"
     await core.observe_user(QQ, "我下个月要去日本看枫叶，顺便想买台相机")
     await core.observe_user(PHONE, "相机的事我还没定下来")
     st = core._load()
-    assert list(st["sessions"].keys()) == ["shared_alice"], st["sessions"].keys()
-    assert len(st["sessions"]["shared_alice"]["topics"]) >= 1
+    assert list(st["sessions"].keys()) == ["shared_testuser"], st["sessions"].keys()
+    assert len(st["sessions"]["shared_testuser"]["topics"]) >= 1
     off = make_core()
     assert off._sid(QQ) != off._sid(PHONE)
     print("[N11] 共享作用域：语音与 QQ 同一份话题；关闭时按会话隔离 OK")

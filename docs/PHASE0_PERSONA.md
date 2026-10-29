@@ -13,7 +13,7 @@
 
 ## 2. 候选位置与选主文档的判断依据
 
-服务器 `ssh.example.com:22`（用户 `alice`），容器 `astrbot`，AstrBot 数据根 `/opt/astrbot/data`。逐个排查过的候选：
+服务器 服务器（已脱敏），容器 `astrbot`，AstrBot 数据根 `/opt/astrbot/data`。逐个排查过的候选：
 
 | 候选 | 结论 |
 | --- | --- |

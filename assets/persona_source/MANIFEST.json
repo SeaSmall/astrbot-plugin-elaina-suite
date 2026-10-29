@@ -3,7 +3,6 @@
   "kind": "persona_source_manifest",
   "generated_at": "2026-10-28T18:45:00+08:00",
   "generated_by": "phase0-c/persona-forger",
-  "server": "ssh.example.com:22 (user alice), container astrbot, AstrBot data root /opt/astrbot/data",
   "primary_document": "assets/persona_source/astrbot_db/personas/elaina_v2.system_prompt.txt",
   "supplementary": [
     "assets/persona_source/elaina-agent/assets/openclaw-workspace/PERSONA_ELAINA.md",
