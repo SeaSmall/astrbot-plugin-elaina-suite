@@ -5687,6 +5687,9 @@ class LivingMemoryCore(_PluginCoreBase):
         if mem is None:
             return
         infer = self._cfg_bool("mem0_infer", False)
+        # 推荐路径：先用对话模型把整轮对话提炼成事实，再以 infer=False 写入。
+        # 直接 infer=False 写原文会把「你好」「蛙趣」这类对话原句当记忆存下来，污染召回。
+        distill = self._cfg_bool("mem0_distill", True) and not infer
         meta = {"kind": "chat", "session": self._sid(umo or "")}
         clean = [
             {"role": str(m.get("role") or "user"), "content": str(m.get("content") or "")}
@@ -5697,6 +5700,27 @@ class LivingMemoryCore(_PluginCoreBase):
             return
         try:
             t0 = time.time()
+            if distill:
+                facts = await self._distill_facts(clean)
+                if not facts:
+                    logger.info(
+                        f"[memory] 本轮未提炼出值得长期记住的事实（{len(clean)} 条消息，不写入）"
+                    )
+                    return
+                for fact in facts:
+                    await asyncio.to_thread(
+                        mem.add,
+                        fact,
+                        user_id=self._uid(""),
+                        infer=False,
+                        metadata=dict(meta, distilled=True),
+                    )
+                self._touch_meta()
+                logger.info(
+                    f"[memory] 提炼写入 {len(facts)} 条事实（{time.time() - t0:.1f}s, "
+                    f"scope={self._uid('')}）：{' / '.join(facts)}"
+                )
+                return
             await asyncio.to_thread(
                 mem.add, clean, user_id=self._uid(""), infer=infer, metadata=meta
             )
@@ -5707,6 +5731,64 @@ class LivingMemoryCore(_PluginCoreBase):
             )
         except Exception as e:
             logger.warning(f"[memory] 写入记忆失败: {e}")
+
+    async def _distill_facts(self, clean: list) -> list:
+        """把一轮对话提炼成「关于用户的事实」（最多 3 条）；无可用模型或提炼失败时返回 []。"""
+        convo = "\n".join(
+            ("用户" if str(m.get("role") or "") == "user" else "伊蕾娜")
+            + "："
+            + str(m.get("content") or "")
+            for m in clean
+        )
+        prompt = (
+            "从下面这段对话里提取「值得长期记住的关于用户的事实」：偏好、习惯、计划、经历、"
+            "身体状况（过敏/疾病）、重要的人与安排。\n"
+            "要求：\n"
+            "1. 每条一行，以「用户」开头，第三人称陈述，不超过 40 字；\n"
+            "2. 只写事实，不要复述对话、不要写情绪或寒暄、不要编号以外的多余内容；\n"
+            "3. 最多 3 条；没有值得记的就只输出 NONE。\n\n"
+            "对话：\n" + convo[:2000]
+        )
+        text = ""
+        ctx = self.context
+        try:
+            prov_id = None
+            get_using = getattr(ctx, "get_using_provider_async", None)
+            if callable(get_using):
+                prov = await get_using()
+                meta = getattr(prov, "meta", None) if prov else None
+                if callable(meta):
+                    prov_id = getattr(meta(), "id", None)
+            if prov_id and callable(getattr(ctx, "llm_generate", None)):
+                resp = await ctx.llm_generate(
+                    chat_provider_id=prov_id,
+                    prompt=prompt,
+                    system_prompt="你是一个只输出事实的记忆整理器。",
+                )
+                text = ProactiveGuardCore._llm_text(resp)
+        except Exception as e:
+            logger.debug(f"[memory] 提炼事实调用失败: {e}")
+        if not text:
+            try:
+                get_prov = getattr(ctx, "get_using_provider", None)
+                if callable(get_prov):
+                    prov = get_prov()
+                    if prov is not None and callable(getattr(prov, "text_chat", None)):
+                        text = ProactiveGuardCore._llm_text(
+                            await prov.text_chat(prompt=prompt, session_id=None, image_urls=[])
+                        )
+            except Exception as e:
+                logger.debug(f"[memory] 提炼事实回退失败: {e}")
+        if not text:
+            return []
+        out = []
+        for line in str(text).replace("```", "").splitlines():
+            s = line.strip().lstrip("-•*·0123456789.、)） ").strip()
+            if not s or s.upper() == "NONE" or len(s) < 4:
+                continue
+            if s not in out:
+                out.append(s[:120])
+        return out[:3]
 
     # ---------------------- 单一记忆源：scope / 水位 / 展示 ---------------------- #
     def _meta_file(self) -> str:

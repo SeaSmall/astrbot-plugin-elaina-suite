@@ -764,3 +764,21 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
   开启共享后两个通道读到的 PAD 与记忆命名空间一致。
 - 服务器同步清理：删除 `skills/elaina-agent` 与 `skills/unclecheng-reduce-ai-perception-v2`
   （备份在 `<data>/_skill_bak_*`），并把人 `personas.elaina_v2_notools.skills` 中的这两项摘掉。
+
+## v1.10.1（2026-10-29）
+
+### 🧹 写入前提炼事实（`mem0_distill`，默认开启）
+
+- 真机清理时发现 mem0 里 56 条记忆中有 **22 条是原始对话原句**（「<对话原句已脱敏>」…）——因为写入走 `infer=False`，mem0 不做任何归纳。
+- 试过打开 mem0 自带的 `mem0_infer=true`，服务器上直接失败：`LLM extraction failed: Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set.`（mem0 要一份独立的 openai 兼容 key，而 AstrBot 的 provider 是运行期注入的，插件侧拿不到可用的明文 key；另外默认模型 `mimo-v2.6-pro` 不在 Token Plan 已知列表）。
+- 改为**插件自己提炼**：复用对话模型（`ctx.get_using_provider_async()` + `ctx.llm_generate`，失败回退 `get_using_provider().text_chat`），把每轮批量消息压成 1~3 条「关于用户的事实」（第三人称、每条 ≤40 字、最多 3 条、没有就输出 NONE），再逐条 `mem.add(..., infer=False, metadata={"distilled": True})`。
+- 没有事实时整轮跳过并记日志，**不退回存原文**；提炼失败（无模型 / 调用异常）同样跳过，不影响聊天。
+- 新增配置 `mem0_distill`（bool，默认 true，仅在 `mem0_infer` 关闭时生效）；配置面板 154 → **155** 项。
+
+### 🧪 测试
+
+- `tests/test_memory.py`：M6 改为显式 `mem0_distill=False`（验证「原样批量写入」旧路径仍可用）；新增 **M18** `m18_distill_facts`（正常提炼两条事实逐条写入且 `infer=False`/`metadata.distilled=True`、`llm_generate` 抛错回退 `text_chat`、`NONE` 时不写原句）；新增 `make_engine` 默认挂 `FakeCtx`（水位/迁移等用例依赖真实写入路径）。
+
+### ⬆️ 升级注意
+
+- 服务器配置需同时满足：`mem0_infer=false`、`mem0_distill=true`（若之前为排查打开过 `mem0_infer`，务必关掉）。

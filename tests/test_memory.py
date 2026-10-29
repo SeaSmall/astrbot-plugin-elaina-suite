@@ -84,12 +84,54 @@ class FakeOwner:
     def __init__(self, cfg):
         self.config = cfg
         self.kv = {}
+        self.context = None
 
     async def get_kv_data(self, key, default=None):
         return self.kv.get(key, default)
 
     async def put_kv_data(self, key, value):
         self.kv[key] = value
+
+
+class FakeProvider:
+    class Meta:
+        id = "deepseek/deepseek-v4-flash"
+
+    def meta(self):
+        return self.Meta()
+
+
+class FakeCtx:
+    """假 AstrBot context：llm_generate 返回可配置文本；used to test 事实提炼。"""
+
+    def __init__(self, text="用户喜欢布丁", raise_llm=False, chat_text="用户喜欢牛角包"):
+        self.text = text
+        self.raise_llm = raise_llm
+        self.chat_text = chat_text
+        self.prompts = []
+        self.chat_prompts = []
+        self.return_empty = False
+
+    async def get_using_provider_async(self):
+        return FakeProvider()
+
+    async def llm_generate(self, **kw):
+        self.prompts.append(str(kw.get("prompt") or ""))
+        if self.raise_llm:
+            raise RuntimeError("llm boom")
+        if self.return_empty:
+            return None
+        return types.SimpleNamespace(completion_text=self.text)
+
+    def get_using_provider(self):
+        outer = self
+
+        class Prov:
+            async def text_chat(self, prompt=None, **kw):
+                outer.chat_prompts.append(str(prompt or ""))
+                return types.SimpleNamespace(completion_text=outer.chat_text)
+
+        return Prov()
 
 
 BASE = {
@@ -113,7 +155,9 @@ def make_engine(**overrides):
     FakeMemory.instances = []
     FakeMemory.fail = False
     install_fake_mem0()
-    return mod.LivingMemoryCore(FakeOwner(cfg))
+    owner = FakeOwner(cfg)
+    owner.context = FakeCtx()
+    return mod.LivingMemoryCore(owner)
 
 
 def ev(umo="aiocqhttp:Friend:10001", text="我今天买了布丁"):
@@ -220,7 +264,7 @@ async def m10_seed_sees_all_beyond_default_limit():
 
 
 async def m6_buffered_write():
-    e = make_engine(mem0_flush_turns=2)
+    e = make_engine(mem0_flush_turns=2, mem0_distill=False)
     await e.on_user_message(ev(text="第一句"))
     await e.on_llm_response(ev(), resp("第一回"))
     mem = await e._ensure()
@@ -234,7 +278,7 @@ async def m6_buffered_write():
     assert len(msgs) == 4 and [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
     assert str(kw.get("user_id")).startswith("u_")
     assert kw.get("infer") is False
-    print("[M6] 攒够 2 轮后台批量写入（infer=False，按会话 user_id） OK")
+    print("[M6] 攒够 2 轮后台批量写入（distill 关：原样批量，infer=False） OK")
 
 
 async def m7_failure_degrade():
@@ -423,13 +467,62 @@ async def m17_warmup_order_and_dedupe():
     print("[M17] 启动顺序先迁后种；重复条目按文本去重，无重复时空转 OK")
 
 
+async def m18_distill_facts():
+    """写入前把对话提炼成事实：逐条 infer=False 写入；调用失败回退 text_chat；NONE 不写。"""
+    # 1) 正常提炼：两条事实 → 两次 add，每次一条字符串，metadata.distilled=True
+    e = make_engine(mem0_flush_turns=2, mem0_distill=True)
+    e.owner.context = FakeCtx(
+        text="- 用户计划 11 月 15 日去京都，住四条河原町\n- 用户对香菜过敏\nNONE"
+    )
+    await e.on_user_message(ev(text="我 11 月 15 号去京都，住四条河原町"))
+    await e.on_llm_response(ev(), resp("记下了"))
+    await e.on_user_message(ev(text="另外我对香菜过敏"))
+    await e.on_llm_response(ev(), resp("知道了"))
+    await flush_tasks(e)
+    mem = await e._ensure()
+    adds = [c for c in mem.calls if c[0] == "add"]
+    assert len(adds) == 2, adds
+    facts = [c[1] for c in adds]
+    assert all(isinstance(f, str) for f in facts), facts
+    assert "京都" in facts[0] and "香菜" in facts[1], facts
+    assert adds[0][2].get("infer") is False
+    assert adds[0][2].get("metadata", {}).get("distilled") is True
+    assert adds[0][2].get("user_id") == "u_owner"
+    assert "对话" in e.owner.context.prompts[-1] or "提取" in e.owner.context.prompts[-1]
+
+    # 2) llm_generate 抛错 → 回退 text_chat，仍写入提炼结果
+    e2 = make_engine(mem0_flush_turns=2, mem0_distill=True)
+    e2.owner.context = FakeCtx(raise_llm=True, chat_text="用户喜欢牛角包")
+    await e2.on_user_message(ev(text="我爱吃牛角包"))
+    await e2.on_llm_response(ev(), resp("嗯"))
+    await e2.on_user_message(ev(text="真的"))
+    await e2.on_llm_response(ev(), resp("好"))
+    await flush_tasks(e2)
+    mem2 = await e2._ensure()
+    adds2 = [c for c in mem2.calls if c[0] == "add"]
+    assert len(adds2) == 1 and "牛角包" in adds2[0][1], adds2
+    assert e2.owner.context.chat_prompts, "应回退到 text_chat"
+
+    # 3) 提炼结果为 NONE / 空 → 不写入任何东西（不退回存原文）
+    e3 = make_engine(mem0_flush_turns=2, mem0_distill=True)
+    e3.owner.context = FakeCtx(text="NONE")
+    await e3.on_user_message(ev(text="你好"))
+    await e3.on_llm_response(ev(), resp("你好呀"))
+    await e3.on_user_message(ev(text="蛙趣"))
+    await e3.on_llm_response(ev(), resp("怎么啦"))
+    await flush_tasks(e3)
+    mem3 = await e3._ensure()
+    assert not [c for c in mem3.calls if c[0] == "add"], "NONE 时不应写入原句"
+    print("[M18] 写入前提炼事实→逐条 infer=False；失败回退 text_chat；NONE 不写原句 OK")
+
+
 async def main():
     for fn in [m1_disabled, m2_singleton, m3_search_contract, m4_recall_block,
                m5_seed_idempotent, m6_buffered_write, m7_failure_degrade, m8_close, m9_wiring,
                m10_seed_sees_all_beyond_default_limit, m11_affect_rerank,
                m12_affect_recall_switch, m13_affect_wiring, m14_single_scope,
                m15_watermark_and_migration, m16_memory_command_reads_mem0,
-               m17_warmup_order_and_dedupe]:
+               m17_warmup_order_and_dedupe, m18_distill_facts]:
         await fn()
     print("阶段二（long-term memory）测试全部通过")
 

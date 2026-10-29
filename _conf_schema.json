@@ -531,6 +531,11 @@
     "default": false,
     "description": "写入时是否让 LLM 抽取事实。开启会有 13 秒级延迟、抽取质量取决于模型，默认关闭（直接存原文）。"
   },
+  "mem0_distill": {
+    "type": "bool",
+    "description": "写入前先提炼成事实（推荐开启）：用对话模型把每轮对话压成「关于用户的事实」再存入 Mem0；关闭则直接存原始对话，容易把寒暄原句当记忆。仅在 mem0_infer 关闭时生效。",
+    "default": true
+  },
   "affect_enabled": {
     "type": "bool",
     "description": "启用情感状态（阶段三 · Sentipolis PAD 连续情感 + 双速动力学 + 沉默评估）",
