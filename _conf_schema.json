@@ -413,6 +413,16 @@
     "default": "23:30-07:30",
     "description": "【主动消息 v2】安静时段（HH:MM-HH:MM，可跨午夜）：时段内不触发；若计划触发时间落在里面，顺延到时段结束后 5~25 分钟。留空或写 off 表示不限制"
   },
+  "living_sleep_aware": {
+    "type": "bool",
+    "default": true,
+    "description": "【主动消息 v2】沉默是否扣除睡眠时段（默认开）：计算「多久没聊了」时，把睡眠时段里的时间扣掉，避免每天早上一起来就因为「七个小时没找我」触发满格主动消息"
+  },
+  "living_sleep_hours": {
+    "type": "string",
+    "default": "",
+    "description": "【主动消息 v2】睡眠时段（HH:MM-HH:MM，可跨午夜），留空＝沿用上面的安静时段；写 off 也等于沿用（关掉请用 living_sleep_aware）"
+  },
   "living_offset_min": {
     "type": "int",
     "default": 5,
@@ -555,6 +565,16 @@
     "type": "int",
     "description": "沉默评估基线：多久不回话才算反常（分钟，默认 720 = 12 小时）",
     "default": 720
+  },
+  "affect_sleep_aware": {
+    "type": "bool",
+    "default": true,
+    "description": "沉默评估是否扣除睡眠时段（默认开）：夜里睡觉的时间不算「对方很久没回话」，也不算情绪自然平复；睡眠时段默认沿用主动消息的安静时段"
+  },
+  "affect_sleep_hours": {
+    "type": "string",
+    "default": "",
+    "description": "情感侧独立睡眠时段（HH:MM-HH:MM，可跨午夜）：留空＝沿用 living_sleep_hours / living_quiet_hours；写 off 表示这一侧不扣睡眠"
   },
   "affect_silence_check_minutes": {
     "type": "int",

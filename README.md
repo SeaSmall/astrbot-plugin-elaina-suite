@@ -103,18 +103,18 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 155 项，按前缀分组：
+配置面板里共 159 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `ai_enabled` / `security_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `ai_recent_days` / `security_recent_days` / `security_kev_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_ai` / `feeds_security` / `feeds_medical` / `feeds_policy` / `llm_prompt`
 - **门禁 / 人格消息**：`pg_enabled` / `block_proactive` / `strict_mode` / `active_window_minutes` / `allow_senders` / `pause_active_agent_jobs` / `gen_time` / `pg_timezone` / `world_setting` / `self_share_ratio` / `message_prompt` / `subagent_enabled` / `subagent_parallel` / `subagent_concurrency` / `subagent_review` / `dispatch_fact_check` / `dispatch_regenerate_on_memory_change` / `msg_count_min` / `msg_count_max` / `window_start` / `window_end` / `missed_grace_minutes` / `record_to_history` / `pg_target_sessions` / `only_private`
-- **主动消息 v2（阶段一）**：`living_enabled` / `living_min_silence_minutes` / `living_cooldown_minutes` / `living_daily_max` / `living_quiet_hours` / `living_offset_min` / `living_offset_max` / `living_ramp_minutes` / `living_decision_check_minutes` / `living_persona_chars` / `living_worldview_chars`
+- **主动消息 v2（阶段一）**：`living_enabled` / `living_min_silence_minutes` / `living_cooldown_minutes` / `living_daily_max` / `living_quiet_hours` / `living_sleep_aware` / `living_sleep_hours` / `living_offset_min` / `living_offset_max` / `living_ramp_minutes` / `living_decision_check_minutes` / `living_persona_chars` / `living_worldview_chars`
 - **长期记忆（阶段二/十 · mem0 唯一源）**：`mem0_enabled` / `mem0_llm_model` / `mem0_llm_base_url` / `mem0_llm_api_key` / `mem0_embed_model` / `mem0_top_k` / `mem0_threshold_pct` / `mem0_seed_facts` / `mem0_flush_turns` / `mem0_recall_chars` / `mem0_infer` / `mem0_distill` / `mem0_affect_recall` / `mem0_affect_boost_pct` / `mem0_unresolved_boost_pct` / `mem0_migrate_legacy`
 - **动机与注意力（阶段四 · GWA 竞争 + 内在动机）**：`motivation_enabled` / `motivation_affect_gate` / `motivation_learning_gate` / `motivation_topic_max` / `motivation_topic_chars` / `motivation_engage_window_minutes` / `motivation_select_noise` / `motivation_loser_decay`
 - **人格常驻注入（阶段七）**：`persona_inject_enabled` / `persona_inject_chars`
 - **跨会话共享（阶段八）**：`shared_scope_enabled` / `shared_scope_id`
 - **傲娇表达（阶段五 · 三路径 + 审校）**：`tsundere_enabled` / `tsundere_review_enabled` / `tsundere_encrypt_negative` / `tsundere_max_retry` / `tsundere_chat_inject`
-- **情感状态（阶段三/九 · Sentipolis PAD，全局单例）**：`affect_enabled` / `affect_fast_mode` / `affect_decay_half_life_minutes` / `affect_silence_threshold_minutes` / `affect_silence_check_minutes` / `affect_silence_cooldown_minutes` / `affect_silence_target` / `affect_reflect_poignancy` / `affect_slow_delta_cap` / `affect_inject_chars` / `affect_baseline` / `affect_primary_user_id`
+- **情感状态（阶段三/九 · Sentipolis PAD，全局单例）**：`affect_enabled` / `affect_fast_mode` / `affect_decay_half_life_minutes` / `affect_silence_threshold_minutes` / `affect_silence_check_minutes` / `affect_silence_cooldown_minutes` / `affect_silence_target` / `affect_reflect_poignancy` / `affect_slow_delta_cap` / `affect_inject_chars` / `affect_baseline` / `affect_primary_user_id` / `affect_sleep_aware` / `affect_sleep_hours`
 - **Elaina 表情包**：`meme_enabled` / `meme_probability` / `meme_dir` / `send_timeout` / `max_meme_mb`
 - **LLM 拦截兜底**：`guard_enabled` / `guard_mode` / `guard_retry_provider_id` / `guard_retry_attempts` / `guard_retry_keep_system_prompt` / `guard_retry_timeout` / `guard_fallback_text` / `guard_soft_scan` / `guard_soft_max_len` / `guard_extra_markers` / `guard_patch_custom_error_reply` / `guard_dump_on_reject` / `guard_dump_dir` / `guard_log_prompt_preview`
 - **系统健康**：`health_enabled` / `health_cron` / `health_timezone` / `health_target_sessions` / `health_show_disk` / `health_show_network`
@@ -134,6 +134,38 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 开 `affect_fast_mode=llm` 可以换成更细的 LLM 评估，但每轮会多一次极短调用。
 状态落在 `<data>/affect_state.json`，`/情感状态` 可随时查看当前 PAD、重要度与沉默严重度；
 把开关关掉即完全回到旧行为（不读不写不注入）。
+
+**Q：早上第一条消息总说「已经七个小时没找我了」？**
+
+人是要睡觉的。旧版把所有「没聊」都当成真实沉默，于是 23:30 睡到 07:30 的 8 小时
+被原样算成「半天没理我」——主动消息一开口就是「你昨天去哪了」，情感状态也一路往下掉。
+
+v1.11.0 起沉默与衰减只数**清醒时间**：
+
+- 睡眠窗口由 `living_sleep_hours`（主动消息）/ `affect_sleep_hours`（情感）指定，格式 `23:30-07:30`，
+  留空则沿用 `living_quiet_hours`（安静时段本来≈睡觉时段，避免两套时间互相打架）；
+- 填 `off` 或把 `living_sleep_aware` / `affect_sleep_aware` 关掉，即完全回到旧行为（全部按真实时间算）；
+- 跨午夜、跨多天、夏令时都按本地时区逐日展开计算，不会被 DST 少算或多算一小时；
+- 生成提示词里会写明「其中约 N 小时是各自的睡眠，已经扣除，不要把睡觉当成冷落你」，
+  所以早上的第一句不会再拿睡觉说事。
+
+**Q：主动消息怎么老追问「上次那件事」，可那件事根本不存在？**
+
+旧版的 `followup`（追问）与 `curiosity`（好奇）候选**无论有没有由头都会进候选池**
+（没由头只乘 0.35 的权重），而它照样可能赢下竞争；`care` 的由头还是写死的
+「记起了对方提过的事」。模型手上没有任何事实，只能现编一个「上次那个事」——
+这就是「这个事完全是自己认为的」的根源。
+
+v1.11.0 起「由头」只有一个来源，拿不到就不说：
+
+1. **用户在真实会话里说过的话**：`observe_user` 把用户原话记进待接话题池，
+   现在会先过滤寒暄（`嗯`/`晚安`/`哈哈哈`/纯数字等不算话题）；
+2. **长期记忆召回**：用最近发言去 mem0 查回的事实（`mem0_enabled` 打开时）。
+
+没有由头时，追问与好奇**直接不生成**（候选不存在，生成前还有一道闸门，
+连 LLM 都不会调用）；`care` 也不会再自称「记起你说过」，而是做不指名细节的关心。
+有由头时，证据会从候选一路传到计划、待触发、生成，写进提示词里的
+`【你确实记得的事（只能引用这些，不许扩写或替换）】`，并明令「一个字都不许扩写/拼接/替换」。
 
 **Q：长期记忆（`mem0_enabled`）值得开吗？会不会拖慢回复？**
 - 第一次开启或重启后首次触发生成时会有 10~20 秒的模型加载（日志 `[memory] mem0 就绪（Xs）`），这段时间聊天不受影响（后台线程）；

@@ -800,3 +800,67 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
 
 - `tests/test_merged.py` [15] 增加 15c：旧名映射三分支 + `XIAOMI_MODEL_FALLBACKS` 不含 2.5 +
   配置写 `mimo-v2.5` 时**实际请求体里的 model 为 `mimo-v2.6-flash`**。
+
+## v1.11.0（2026-11-02）— 睡眠时段不计数 + 主动消息「由头」必须来自真实记忆
+
+### 😴 沉默与情绪衰减不再把「睡觉」算成「冷落」
+
+- **问题**：主动消息与情感状态都用真实墙钟时间算「多久没聊」，于是 23:30–07:30
+  这 8 小时被原样计成沉默——每天早上第一条就是「已经七个小时没找我了」，
+  情感分也被这 8 小时的无由头衰减压低。
+- **新行为**：新增 `living_sleep_aware` / `living_sleep_hours`、`affect_sleep_aware` /
+  `affect_sleep_hours`（格式 `23:30-07:30`，留空沿用 `living_quiet_hours`，填 `off` 关闭）。
+  沉默判定（`_living_should_initiate`、`_living_candidates`、`_living_compose` 的间隔）
+  与情感衰减（`AffectCore.get_state` 的 `dt_min`、`silence_severity`）一律只数**清醒分钟**。
+- **实现**：模块级纯函数 `_parse_sleep_range` / `_sleep_minutes_between` / `_awake_minutes_between`
+  按本地时区逐日展开窗口（支持跨午夜、跨多天、夏令时；DST 日实测 23:30→07:30 只算 420 分钟），
+  上限 400 天防护；不依赖任何插件状态，可独立单测。
+- **提示词**：`LIVING_PROMPT_TEMPLATE` 的间隔处带 `{sleep_note}`，当被扣掉的睡眠 ≥30 分钟时
+  写明「其中约 N 小时是各自的睡眠时间，已经扣除；不要把睡觉当成对方冷落你」，
+  早上的主动消息不会再拿睡觉说事。
+- 配置面板 155 → **159** 项。
+
+### 🎯 主动消息的「上次那件事」必须有据可查，不许自己猜
+
+- **问题**（用户原话）：「动机队列总说『这个事』，而这个『事』是什么完全是自己认为的，
+  这个需要结合记忆去做，而不是自己去猜」。旧版 `followup` / `curiosity` 候选**无由头也进池**
+  （只乘 0.35 权重，仍可能赢），`care` 的由头写死成「记起了对方提过的事」，
+  生成时模型手上没有事实，只能现编——于是天天追问一件根本没发生的事。
+- **由头来源只有两个，且都要真的发生过**：
+  1. `MotivationCore` 的待接话题（用户原话）——新增 `meaningful_topic()` 过滤寒暄/语气词/
+     纯数字（`嗯`、`晚安`、`哈哈哈` 等不再进话题池）；
+  2. 长期记忆召回（`LivingMemoryCore.recent_text` 作查询 → `search()` 取事实）。
+  两条来源在 `ProactiveGuardCore._living_grounding_evidence()` 里合并去重（最多 4 条，失败按空处理）。
+- **没有由头就不说**：`_living_candidates` 无由头时不生成追问/好奇类候选，
+  `care` 的 reason 置空；`MotivationCore.grounded_only()` 再兜一道打分闸门；
+  `_living_compose()` 遇到无由头的追问/好奇直接返回空串、**不调用 LLM**（宁可不说也不编）。
+- **由头随流程走到底**：候选 → `_living_plan_intent()` → `s["pending"]` → `_living_fire()` → 生成，
+  提示词里出现 `【你确实记得的事（只能引用这些，不许扩写或替换）】`；
+  没有由头时那一栏写明「无（本次不许提及任何『上次那件事』之类的具体细节）」。
+  `_living_merge_evidence()` 合并**所有候选**的证据而不只取赢家——理由：赢的常是 `share`，
+  只取赢家会让提示词里一条事实都没有，又退回「自己猜」。
+
+### 🧪 测试
+
+- 新增 `tests/test_sleep_aware.py`（S1~S8）：区间解析（`-`/`~`/`—`/`至`、非法值、`off`）；
+  窗口内/外/跨午夜/48 小时/夏令时；情感衰减比 16×（240 清醒 vs 720 真实墙钟）与
+  `silence_severity` 归零；`_living_awake_gap_min` = 240 分钟、`_living_human_gap` 显示「4 小时」；
+  生成提示词含「4 小时 / 睡眠时间 / 已经扣除 / 不许…编」；4 个新配置键默认值。
+- 新增 `tests/test_grounded_intent.py`（G1~G7）：寒暄不进话题池；无由头不产生追问/好奇候选且
+  `care.reason` 为空；用户原话「下周去杭州出差」→ 证据含「杭州」；记忆召回「他昨天说嗓子疼」→
+  证据含「嗓子」；plan → compose 提示词含「你确实记得的事」+「杭州」；无由头时 compose 返回空
+  且不调 LLM；`grounded_only` 三分支。
+- `tests/test_sleep_aware.py` 新增 **S9**：全新会话（`last_user_at=0`）时「距离上次互动」
+  不能退化成「1970 年至今」，也不能凭空写出睡眠说明——修 `_living_awake_gap_min` 与
+  `_living_compose` 对「没有锚点」的处理（无锚点时 slept=0、间隔按最小沉默下限起算）。
+- 上游 7 个测试全部保持通过。为让断言与运行时刻无关，`test_affect` / `test_global` /
+  `test_motivation` 的 fixture 显式 `affect_sleep_hours: "off"`，`test_living` / `test_tsundere`
+  显式 `living_sleep_aware: False`（否则半夜跑测试会因跨过睡眠窗口而拿到不同的衰减值——
+  实测 23:11 跑 a1 得到 0.724 而非 0.4，就是 `now+120min` 跨过了 23:30 边界）。
+
+### ⬆️ 升级注意
+
+- 默认即开启睡眠豁免（`*_sleep_aware = true`、`*_sleep_hours` 留空 → 沿用 `living_quiet_hours`）。
+  若想完全保持旧行为，把这两个开关关掉，或把 `*_sleep_hours` 填 `off`。
+- 睡眠窗口请与 `pg_timezone` 一致；情感侧优先读 `affect_sleep_hours`，其次
+  `living_sleep_hours`，最后 `living_quiet_hours`——设置一处即可，不必两边重复填。

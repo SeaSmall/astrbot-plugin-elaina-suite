@@ -52,6 +52,8 @@ BASE = {
     "motivation_engage_window_minutes": 180,
     "motivation_select_noise": 0.0,
     "motivation_loser_decay": 0.85,
+    # v1.11.0：情感门控读的沉默/衰减与运行时刻无关
+    "affect_sleep_hours": "off",
 }
 UMO = "aiocqhttp:Friend:10001"
 

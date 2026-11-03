@@ -63,6 +63,9 @@ BASE = {
     "affect_slow_delta_cap": 0.6,
     "affect_inject_chars": 600,
     "affect_baseline": "0.15,0.25,0.70",
+    # v1.11.0：测试断言必须与「运行时刻」无关，这里显式关闭睡眠豁免；
+    # 睡眠时段本身由 tests/test_sleep_aware.py 用固定时间戳覆盖。
+    "affect_sleep_hours": "off",
 }
 UMO = "aiocqhttp:Friend:10001"
 

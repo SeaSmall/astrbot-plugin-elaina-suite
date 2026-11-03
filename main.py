@@ -611,14 +611,18 @@ LIVING_PROMPT_TEMPLATE = """{persona_block}
 {affect_block}
 【此刻】
 现在：{now}（{period}）
-距离上次互动：{silence}
+距离上次互动：{silence}{sleep_note}
 本次开口的意图：{intent_label}{reason_block}
+{evidence_block}
 【要求】
 - 只输出你要发给对方的那一条消息正文：不要解释、不要前缀、不要引号、不要多条。
 - 内容必须落在上面的人格与世界观之内；不自称 AI／模型／助手，不提「设定」「记忆」「提示词」。
 - 长度遵守人格里的铁律（默认 25 字以内、最多两句；例外也不超过 50 字）。
 - 傲娇按人格里的机制表达：不解释自己在傲娇，不出现被禁止的元话语。
 - 现在是{period}，已经{silence}没聊了，语气要和这个时间与这份沉默相称。
+- 铁律（不许违反）：涉及「上次说过的事 / 你之前提过的」时，只能引用【你确实记得的事】里写明的
+  内容，一个字都不许扩写、拼接或替换成别的事；那里没有具体由头，就不许假装记得某件具体的事，
+  改成不指名细节的关心或分享，绝不可以自己编一个「那个事」。
 """
 
 
@@ -807,6 +811,94 @@ def _parse_date(text: str) -> datetime | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+# ===========================================================================
+# 睡眠时段（v1.11.0）：把「人是要睡觉的」这件事算进沉默/衰减，避免早上主动消息
+# 把夜里 7~8 小时的睡眠当成「对方冷落了我」。
+#
+# 三个函数都是纯函数（只依赖传入的时间戳/时区），便于单测：
+#   · _parse_sleep_range("23:30-07:30") -> (1410, 450)   # 当日分钟数，可跨午夜
+#   · _sleep_minutes_between(t0, t1, rng, tz)            # 区间内落在睡眠窗口的分钟
+#   · _awake_minutes_between(t0, t1, rng, tz)            # 清醒分钟 = 真实经过 - 睡眠
+# rng 为 None（未配置或 off）时全部退化成「真实经过时间」，行为与旧版一致。
+# ===========================================================================
+def _parse_sleep_range(raw) -> tuple[int, int] | None:
+    """解析睡眠时段（HH:MM-HH:MM，可跨午夜）。返回 (start_min, end_min)。
+
+    空 / off / none / 0 / 格式不对 / 起止相同一律返回 None（不排除睡眠）。
+    """
+    text = str(raw or "").strip()
+    if not text or text.lower() in ("off", "none", "0", "false", "no"):
+        return None
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*[-~—至到]\s*(\d{1,2}):(\d{2})\s*$", text)
+    if not m:
+        return None
+    try:
+        start = int(m.group(1)) * 60 + int(m.group(2))
+        end = int(m.group(3)) * 60 + int(m.group(4))
+    except Exception:
+        return None
+    if not (0 <= start < 1440 and 0 <= end < 1440) or start == end:
+        return None
+    return start, end
+
+
+def _sleep_minutes_between(
+    t0: float, t1: float, rng: tuple[int, int] | None, tz=None
+) -> float:
+    """[t0, t1] 这段时间里，有多少分钟落在「睡眠窗口」内。
+
+    窗口按 `tz` 的本地日期逐天展开：日期 D 的窗口是 D 当天 start:00 到
+    D 当天 end:00；若 end <= start（跨午夜，如 23:30-07:30）则结束时间是 D+1。
+    这样跨午夜、跨多天、DST 都能正确累加，且不依赖 t0 落在窗口哪一侧。
+    """
+    if rng is None or t1 <= t0:
+        return 0.0
+    try:
+        start_min, end_min = rng
+        lo, hi = float(t0), float(t1)
+        local_lo = datetime.fromtimestamp(lo, tz) if tz else datetime.fromtimestamp(lo)
+        local_hi = datetime.fromtimestamp(hi, tz) if tz else datetime.fromtimestamp(hi)
+        day = local_lo.date() - timedelta(days=1)
+        last_day = local_hi.date()
+        total = 0.0
+        for _ in range(0, 400):
+            base = datetime.combine(day, datetime.min.time())
+            ws = base + timedelta(minutes=start_min)
+            we = base + timedelta(minutes=end_min)
+            if end_min <= start_min:
+                we = we + timedelta(days=1)
+            if tz is not None:
+                try:
+                    ws = ws.replace(tzinfo=tz)
+                    we = we.replace(tzinfo=tz)
+                except Exception:
+                    pass
+            w_start, w_end = ws.timestamp(), we.timestamp()
+            overlap = min(hi, w_end) - max(lo, w_start)
+            if overlap > 0:
+                total += overlap / 60.0
+            if day >= last_day:
+                break
+            day = day + timedelta(days=1)
+        wall = (hi - lo) / 60.0
+        return max(0.0, min(total, wall))
+    except Exception:
+        return 0.0
+
+
+def _awake_minutes_between(
+    t0: float, t1: float, rng: tuple[int, int] | None, tz=None
+) -> float:
+    """清醒分钟数 = 真实经过分钟 - 睡眠窗口内的分钟（下限 0）。"""
+    try:
+        wall = (float(t1) - float(t0)) / 60.0
+    except Exception:
+        return 0.0
+    if wall <= 0:
+        return 0.0
+    return max(0.0, wall - _sleep_minutes_between(t0, t1, rng, tz))
 
 
 class _PluginCoreBase:
@@ -4366,6 +4458,35 @@ class ProactiveGuardCore(_PluginCoreBase):
             out = out + timedelta(days=1)
         return out
 
+    # ---------------------- 睡眠时段（沉默要扣掉睡觉） ---------------------- #
+    def _living_sleep_range(self) -> tuple[int, int] | None:
+        """睡眠时段：优先 living_sleep_hours，留空则沿用安静时段 living_quiet_hours。
+
+        为什么默认跟着 quiet_hours：安静时段本来就是「她不会说话的时间」，
+        和「对方在睡觉的时间」基本重合，两个独立配置只会互相打架。
+        """
+        raw = str(self.config.get("living_sleep_hours") or "").strip()
+        if not raw:
+            raw = str(self.config.get("living_quiet_hours") or "23:30-07:30")
+        return _parse_sleep_range(raw)
+
+    def _living_awake_minutes(self, t0: float, t1: float) -> float:
+        """真实经过分钟里扣掉睡眠时段（living_sleep_aware=false 时原样返回）。"""
+        if not self._cfg_bool("living_sleep_aware", True):
+            return max(0.0, (float(t1) - float(t0)) / 60.0)
+        return _awake_minutes_between(t0, t1, self._living_sleep_range(), self._living_tz())
+
+    def _living_awake_gap_min(self, s: dict, now_dt: datetime) -> float:
+        """「多久没聊了」的清醒分钟数（主动消息 prompt 与候选打分共用）。
+
+        没有任何互动锚点（全新会话）时，从配置的最小沉默下限起算——绝不能拿
+        `last=0` 去算：那会变成「1970 年至今已经 20626 天没找过我」这种荒唐提示词。
+        """
+        last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
+        if last <= 0:
+            return 1.0
+        return max(1.0, self._living_awake_minutes(last, now_dt.timestamp()))
+
     @staticmethod
     def _living_period(dt: datetime) -> str:
         h = dt.hour
@@ -4497,7 +4618,8 @@ class ProactiveGuardCore(_PluginCoreBase):
         last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
         if last <= 0:
             return False, "没有交互基线"
-        silence_min = (now_ts - last) / 60.0
+        # 沉默按「清醒时间」算：夜里睡觉的时间不算冷落，否则每天早上一起来就满格触发
+        silence_min = self._living_awake_minutes(last, now_ts)
         min_sil = max(1, self._cfg_int("living_min_silence_minutes", 90))
         if silence_min < min_sil:
             return False, f"沉默 {silence_min:.0f} 分钟 < 下限 {min_sil}"
@@ -4521,18 +4643,66 @@ class ProactiveGuardCore(_PluginCoreBase):
             return False, f"概率门未过（p={p:.2f}）"
         return True, f"沉默 {silence_min:.0f} 分钟 / p={p:.2f}"
 
-    def _living_candidates(self, umo: str, s: dict, now_dt: datetime) -> list[dict]:
-        """候选意图池（阶段四会换成真正的评分-选择循环，这里先用可解释的启发式）。"""
+    async def _living_grounding_evidence(self, umo: str, limit: int = 4) -> list[str]:
+        """收集「能指名道姓说出来」的由头（v1.11.0）。
+
+        两条来源，都是有据可查的：
+          1. 用户在真实会话里说过的话（MotivationCore 的待接话题，已过滤寒暄）；
+          2. mem0 长期记忆里关于对方的事实（召回查询用最近发言）。
+        拿不到就返回空列表——空列表意味着「不许开口编事」，而不是「随便编一个」。
+        """
+        out: list[str] = []
+        mot = getattr(self.owner, "motivation", None)
+        if mot is not None:
+            try:
+                out.extend(mot.grounded_topics(umo, limit=limit))
+            except Exception as e:
+                logger.debug(f"[living] 取待接话题失败: {e}")
+        if len(out) < limit:
+            engine = getattr(self.owner, "living_memory", None)
+            if engine is not None and _core_enabled(engine):
+                try:
+                    query = str(engine.recent_text(umo) or "").strip()
+                    if query:
+                        hits = await engine.search(query, umo, top_k=limit)
+                        for it in hits or []:
+                            text = " ".join(str(it.get("memory") or "").split())
+                            if text:
+                                out.append(text)
+                except Exception as e:
+                    logger.warning(f"[living] 由头召回失败（按无由头处理）: {e}")
+        seen: set = set()
+        uniq: list[str] = []
+        for text in out:
+            key = "".join(ch for ch in str(text) if ch.isalnum())[:20]
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            uniq.append(str(text).strip())
+            if len(uniq) >= limit:
+                break
+        return uniq
+
+    async def _living_candidates(self, umo: str, s: dict, now_dt: datetime) -> list[dict]:
+        """候选意图池（阶段四：评分-选择循环的输入）。
+
+        v1.11.0 修正：`followup` / `curiosity` 只有在**真的有由头**时才进入候选池。
+        旧版无论有没有由头都把这些候选放进去（无由头时只乘 0.35），可它仍然会
+        赢下竞争，生成时 label 又是「追问之前没说完的话题」——模型手上没有事实，
+        只能现编一个「上次那个事」，于是每天早上都在追问一件根本没发生的事。
+        现在：没有由头 → 这两类候选直接不存在；`care` 的「由头」也不再是无条件写死
+        的「记起了对方提过的事」，而是真实证据或空。
+        """
         ratio = max(0, min(100, self._share_ratio()))
         share_w = max(0.1, ratio / 100.0)
         care_w = max(0.1, 1.0 - ratio / 100.0)
         hour = now_dt.hour
         night = 1.0 if hour >= 21 or hour < 6 else 0.6
         day = 1.0 if 9 <= hour <= 20 else 0.6
-        last_gap = max(
-            float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0)
-        )
-        silence_h = max(0.0, (now_dt.timestamp() - last_gap) / 3600.0)
+        # 睡眠时段不计入沉默（v1.11.0）：夜里 8 小时不该被算成「半天没理我」
+        silence_h = self._living_awake_gap_min(s, now_dt) / 60.0
+        evidence = await self._living_grounding_evidence(umo)
+        grounded = evidence[0] if evidence else ""
         out: list[dict] = [
             {
                 "intent": "share",
@@ -4544,40 +4714,82 @@ class ProactiveGuardCore(_PluginCoreBase):
                 "intent": "care",
                 "label": "具体地关心对方的近况（要能说出由头）",
                 "score": 1.0 * care_w * night,
-                "reason": "记起了对方提过的事",
-            },
-            {
-                "intent": "followup",
-                "label": "追问之前没说完的话题",
-                "score": 0.55 * share_w,
-                "reason": "上次聊到一半的事",
-            },
-            {
-                "intent": "curiosity",
-                "label": "对对方提过的东西产生新的好奇",
-                "score": 0.45 * share_w,
-                "reason": "想不通的地方",
+                "reason": (f"记起对方说过：{self._living_shorten(grounded)}" if grounded else ""),
+                "evidence": evidence[:2],
             },
         ]
+        if grounded:
+            out.append(
+                {
+                    "intent": "followup",
+                    "label": "追问之前没说完的话题（由头必须是真实说过的事）",
+                    "score": 0.55 * share_w,
+                    "reason": f"对方之前提过：{self._living_shorten(grounded)}",
+                    "evidence": evidence[:2],
+                }
+            )
+            out.append(
+                {
+                    "intent": "curiosity",
+                    "label": "对对方提过的东西产生新的好奇（只能问真实提过的事）",
+                    "score": 0.45 * share_w,
+                    "reason": f"对「{self._living_shorten(grounded)}」还没想通",
+                    "evidence": evidence[:2],
+                }
+            )
+        else:
+            logger.info("[living] 没有可用的真实由头：本次不提供追问/好奇候选（避免现编事情）")
         if silence_h >= 6:
             out.append(
                 {
                     "intent": "check_in",
                     "label": "试探性地确认对方还在不在（带点别扭，不直白示弱）",
                     "score": 0.4 + 0.05 * min(6.0, silence_h - 6) + 0.2 * care_w,
-                    "reason": f"已经 {self._living_human_gap(silence_h * 60)}没动静",
+                    "reason": f"已经 {self._living_human_gap(silence_h * 60)}没动静（已扣掉睡觉时间）",
                 }
             )
         mot = getattr(self.owner, "motivation", None)
         if mot is not None and mot.enabled():
             try:
                 out = mot.reweight(umo, out, now_dt)
+                out = mot.grounded_only(out, evidence)
             except Exception as e:
                 logger.warning(f"[living] 动机重加权失败（用原分）: {e}")
         return out
 
+    @staticmethod
+    def _living_shorten(text: str, limit: int = 24) -> str:
+        """由头展示用的短句：压掉换行、超长截断，避免把提示词撑爆。"""
+        t = " ".join(str(text or "").split())
+        return t[:limit] if len(t) > limit else t
+
+    @classmethod
+    def _living_merge_evidence(cls, cands: list, limit: int = 4) -> list:
+        """把候选身上带的真实由头汇成一份去重清单（不是只取赢家的）。
+
+        为什么不能只取赢家：赢的往往是 share（分享自己），但「你确实记得的事」
+        对任何意图都是同一份事实基础，只取赢家会让 care/share 在提示词里看不到
+        任何事实，又退回到「自己猜」。这里按出现顺序去重，最多 limit 条。
+        """
+        out, seen = [], set()
+        for c in cands or []:
+            if not isinstance(c, dict):
+                continue
+            for item in c.get("evidence") or []:
+                text = " ".join(str(item or "").split())
+                if not text:
+                    continue
+                key = "".join(ch for ch in text if ch.isalnum())[:20]
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(text)
+                if len(out) >= max(1, int(limit)):
+                    return out
+        return out
+
     async def _living_plan_intent(self, umo: str, s: dict, now_dt: datetime) -> dict:
-        cands = self._living_candidates(umo, s, now_dt)
+        cands = await self._living_candidates(umo, s, now_dt)
         if not cands:
             return {}
         mot = getattr(self.owner, "motivation", None)
@@ -4607,6 +4819,7 @@ class ProactiveGuardCore(_PluginCoreBase):
             "why": str(best.get("why") or ""),
             "offset_min": offset,
             "fire_at": fire_dt.timestamp(),
+            "evidence": self._living_merge_evidence(cands),
         }
 
     async def _living_decide(self, umo: str) -> None:
@@ -4657,6 +4870,7 @@ class ProactiveGuardCore(_PluginCoreBase):
             "reason": plan["reason"],
             "topic": plan.get("topic") or "",
             "why": plan.get("why") or "",
+            "evidence": [str(x) for x in (plan.get("evidence") or []) if str(x).strip()],
             "created": now,
         }
         cooldown = max(1, self._cfg_int("living_cooldown_minutes", 180))
@@ -5022,15 +5236,22 @@ class ProactiveGuardCore(_PluginCoreBase):
                 return fixed
         return ""
     async def _living_compose(
-        self, umo: str, s: dict, intent: str, reason: str, now_dt: datetime, topic: str = ""
+        self,
+        umo: str,
+        s: dict,
+        intent: str,
+        reason: str,
+        now_dt: datetime,
+        topic: str = "",
+        evidence: list | None = None,
     ) -> str:
         persona_block = await self._living_persona_block(umo)
         world_block = await self._living_world_block()
         memory_block = await self._living_memory_block(umo)
         affect_core = getattr(self.owner, "affect", None)
         affect_block = affect_core.describe(umo) if affect_core is not None else ""
-        last = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
-        gap_min = max(1.0, (now_dt.timestamp() - last) / 60.0)
+        # 沉默按清醒时间算（v1.11.0）：夜里那 7~8 小时睡眠不算「好久没聊」
+        gap_min = self._living_awake_gap_min(s, now_dt)
         label = {
             "share": "分享你自己的一件事",
             "care": "具体地关心对方",
@@ -5047,6 +5268,28 @@ class ProactiveGuardCore(_PluginCoreBase):
         prompt = prompt.replace("{period}", self._living_period(now_dt))
         prompt = prompt.replace("{silence}", self._living_human_gap(gap_min))
         prompt = prompt.replace("{intent_label}", label)
+        # 睡眠豁免说明：只在「真实经过明显多于清醒时间」时出现，避免平时啰嗦
+        anchor = max(float(s.get("last_user_at") or 0), float(s.get("last_proactive_at") or 0))
+        wall_min = max(0.0, (now_dt.timestamp() - anchor) / 60.0) if anchor else gap_min
+        slept = max(0.0, wall_min - gap_min)
+        sleep_note = ""
+        if slept >= 30:
+            sleep_note = (
+                f"（其中约 {self._living_human_gap(slept)}是各自的睡眠时间，已经扣除；"
+                "不要把睡觉当成对方冷落你）"
+            )
+        prompt = prompt.replace("{sleep_note}", sleep_note)
+        # 由头清单：只写真实召回/真实说过的话，空则不提供任何「记得的事」
+        ev = [str(x).strip() for x in (evidence or []) if str(x).strip()]
+        if intent in ("followup", "curiosity") and not ev:
+            logger.info(f"[living] 意图 {intent} 没有真实由头，放弃本次生成（不编事情）")
+            return ""
+        if ev:
+            lines = chr(10).join(f"  {i}. {self._living_shorten(t, 60)}" for i, t in enumerate(ev, 1))
+            evidence_block = "【你确实记得的事（只能引用这些，不许扩写或替换）】" + chr(10) + lines
+        else:
+            evidence_block = "【你确实记得的事】无（本次不许提及任何「上次那件事」之类的具体细节）"
+        prompt = prompt.replace("{evidence_block}", evidence_block)
         extra = f"；具体到：{topic}" if topic else ""
         prompt = prompt.replace(
             "{reason_block}", f"（由头：{reason}{extra}）" if (reason or topic) else ""
@@ -5120,6 +5363,7 @@ class ProactiveGuardCore(_PluginCoreBase):
             str(pending.get("reason") or ""),
             now_dt,
             str(pending.get("topic") or ""),
+            [str(x) for x in (pending.get("evidence") or [])],
         )
         if not text:
             self._living_log(s, "skip", "生成失败或未过硬约束")
@@ -6399,7 +6643,8 @@ class AffectCore(_PluginCoreBase):
         now = float(now if now is not None else time.time())
         st = self._entry(umo, now)
         sev = float(st.get("silence_sev") or 0.0)
-        dt_min = (now - float(st.get("updated") or now)) / 60.0
+        # 衰减用清醒分钟：睡觉那段时间不算「情绪自然平复」（v1.11.0）
+        dt_min = self._awake_minutes(float(st.get("updated") or now), now)
         st["pad"] = self._decay_to(st.get("pad") or {}, dt_min, self._silence_target(sev), self._half_life())
         st["updated"] = now
         return st
@@ -6582,12 +6827,49 @@ class AffectCore(_PluginCoreBase):
         """角色节奏基线：低于这个沉默时长不算反常（可配置，默认 12 小时）。"""
         return max(30.0, self._cfloat("affect_silence_threshold_minutes", 720.0))
 
+    # ------------------------------------------------- 睡眠时段（v1.11.0 新增）
+    def _sleep_range(self) -> tuple[int, int] | None:
+        """情感侧睡眠时段：affect_sleep_hours → living_sleep_hours → living_quiet_hours。
+
+        默认跟着主动消息的安静时段走（安静时段≈睡觉时段），避免两套时间互相打架；
+        任何一个键写 off 都可以单独关掉这一侧。
+        """
+        for key in ("affect_sleep_hours", "living_sleep_hours", "living_quiet_hours"):
+            raw = str(self._cfg(key, "") or "").strip()
+            if raw:
+                return _parse_sleep_range(raw)
+        return _parse_sleep_range("23:30-07:30")
+
+    def _sleep_tz(self):
+        guard = getattr(self.owner, "proactive_guard", None)
+        if guard is not None and hasattr(guard, "_living_tz"):
+            try:
+                return guard._living_tz()
+            except Exception:
+                return None
+        return None
+
+    def _awake_minutes(self, t0: float, t1: float) -> float:
+        """真实经过分钟里扣除睡眠时段（affect_sleep_aware=false 时原样返回）。
+
+        为什么衰减也要扣：PAD 衰减本来是「时间流逝让情绪平复」，但人睡着了并没有
+        新的记忆与体验，梦里那 8 小时不该算作 8 小时的平复；而且旧算法会让
+        早上第一次对话时「沉默 8 小时」直接顶满严重度。
+        """
+        try:
+            if not _config_truthy(self._cfg("affect_sleep_aware", True)):
+                return max(0.0, (float(t1) - float(t0)) / 60.0)
+        except Exception:
+            pass
+        return _awake_minutes_between(t0, t1, self._sleep_range(), self._sleep_tz())
+
     def silence_severity(self, umo: str = "", now: float | None = None) -> float:
         """全局沉默严重度：以「主要交互对象」最后一次互动为基准（方案一）。"""
         now = float(now if now is not None else time.time())
         st = self.get_state(umo, now)
         last = float(st.get("last_user_at") or now)
-        silence = max(0.0, (now - last) / 60.0)
+        # 沉默只累计清醒时间：夜里 8 小时睡眠不算「对方很久没回话」（v1.11.0）
+        silence = self._awake_minutes(last, now)
         exp = self._expected_gap_minutes()
         dev = silence / exp
         # 偏离度 -> 严重度：等于基线为 0，2 倍基线为 1，做线性压缩后上限 1.5
@@ -6925,6 +7207,71 @@ class MotivationCore(_PluginCoreBase):
         t = re.sub(r"^[，。！？、,.!?~～…\s]+", "", t)
         return t[:limit]
 
+    # 寒暄/语气词/太短的话不是「话题」：拿它当由头，生成出来就是「你刚才说的那件事…」
+    _TOPIC_STOPWORDS = frozenset((
+        "你好", "在吗", "在不在", "在么", "在嘛", "嗯", "嗯嗯", "哦", "哦哦", "噢", "啊", "呀",
+        "好", "好的", "好吧", "行", "可以", "收到", "ok", "okay", "哈哈", "哈哈哈", "嘿嘿",
+        "晚安", "早安", "早上好", "晚上好", "午安", "睡了", "我睡了", "去睡了", "吃了吗",
+        "谢谢", "多谢", "没事", "没什么", "算了", "不知道", "是吧", "对吧", "是的", "对",
+        "哈哈好", "呃", "诶", "欸", "唉", "哎", "嗯呢", "在的", "来了", "我来了", "拜拜", "再见",
+    ))
+
+    def meaningful_topic(self, text: str) -> bool:
+        """这条「话题」是否值得将来当成由头引用（v1.11.0）。
+
+        旧版把用户的每一句话都截 24 字塞进待接队列，于是「嗯」「好的」「晚安」
+        也会被当成「上次那个事」，追问起来自然全是编的。这里只保留有实义的短语：
+        去掉标点与空白后至少 4 个字符、不是纯寒暄/语气词、不是纯数字/表情。
+        """
+        t = re.sub(r"[\s，。！？、,.!?~～…:：;；\"'「」『』()（）\[\]【】]+", "", str(text or ""))
+        if len(t) < 4:
+            return False
+        low = t.lower()
+        if low in self._TOPIC_STOPWORDS:
+            return False
+        if len(set(low)) <= 2 and len(low) <= 6:
+            # 「哈哈哈」「嗯嗯嗯」这类重复音节
+            return False
+        if re.fullmatch(r"\d+", low):
+            return False
+        return True
+
+    def grounded_topics(self, umo: str, limit: int = 4) -> list:
+        """按「最近提到 + 学习门控」排序，返回可用于由头的真实待接话题（v1.11.0）。
+
+        这是「不许自己猜」的事实来源之一：返回的每一条都能追溯到用户说过的原话。
+        """
+        try:
+            if not self.enabled():
+                return []
+            now_ts = time.time()
+            s = self._sstate(umo)
+            scored = []
+            for item in s.get("pending") or []:
+                if not isinstance(item, dict):
+                    continue
+                text = self._trim_topic(item.get("text"))
+                if not text or not self.meaningful_topic(text):
+                    continue
+                age_h = max(0.0, (now_ts - float(item.get("at") or now_ts)) / 3600.0)
+                recency = 0.5 ** (age_h / 48.0)
+                entry = s["topics"].get(text) or {}
+                scored.append((recency * self.learning_gate(entry), text))
+            scored.sort(key=lambda x: -x[0])
+            out, seen = [], set()
+            for _w, text in scored:
+                key = "".join(ch for ch in text if ch.isalnum())
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(text)
+                if len(out) >= max(1, int(limit)):
+                    break
+            return out
+        except Exception as e:
+            logger.debug(f"[motivation] grounded_topics 失败（按空处理）: {e}")
+            return []
+
     def _topic_entries(self, umo: str) -> list:
         s = self._sstate(umo)
         out = [t for t in (s.get("topics") or {}).values() if isinstance(t, dict)]
@@ -6963,6 +7310,10 @@ class MotivationCore(_PluginCoreBase):
                 s = self._sstate(umo)
                 now = time.time()
                 topic_text = self._trim_topic(text)
+                if topic_text and not self.meaningful_topic(topic_text):
+                    # 寒暄/语气词不当作话题：否则「晚安」会被当成「上次那个事」
+                    logger.debug(f"[motivation] 丢弃无实义话题: {topic_text!r}")
+                    topic_text = ""
                 if topic_text:
                     bucket = s["topics"]
                     hit_key = None
@@ -7105,7 +7456,7 @@ class MotivationCore(_PluginCoreBase):
             if not isinstance(item, dict):
                 continue
             text = self._trim_topic(item.get("text"))
-            if not text:
+            if not text or not self.meaningful_topic(text):
                 continue
             age_h = max(0.0, (now_ts - float(item.get("at") or now_ts)) / 3600.0)
             recency = 0.5 ** (age_h / 48.0)  # 48 小时半衰：越久越不急着接
@@ -7159,6 +7510,30 @@ class MotivationCore(_PluginCoreBase):
         except Exception as e:
             logger.warning(f"[motivation] reweight 失败（退回原候选）: {e}")
             return cands
+
+    @staticmethod
+    def grounded_only(cands: list, evidence: list) -> list:
+        """丢掉「没有真实由头」的追问/好奇类候选（v1.11.0，不许自己猜的闸门）。
+
+        与 reweight 分开的理由：reweight 只负责打分（上游测试与旧调用方依赖它的
+        「压分但保留」语义），而「该不该保留」是策略问题，放在这里做单点决策。
+        evidence 为空时，followup / curiosity 一律丢弃——宁可少说一句，
+        也不许让模型现编一件「上次那个事」。
+        """
+        ev = [str(x).strip() for x in (evidence or []) if str(x).strip()]
+        out = []
+        for c in cands or []:
+            if not isinstance(c, dict):
+                continue
+            intent = str(c.get("intent") or "")
+            if intent in ("followup", "curiosity") and not ev and not str(c.get("topic") or ""):
+                logger.info(
+                    f"[motivation] 丢弃无由头候选 {intent}：没有可追溯的真实话题/"
+                    "记忆，不允许现编「上次那件事」"
+                )
+                continue
+            out.append(c)
+        return out
 
     def select(self, umo: str, cands: list, now_dt: datetime = None) -> dict:
         """GWA 排他性瓶颈：一次只有一个候选赢得注意力，其余降权不删除。"""

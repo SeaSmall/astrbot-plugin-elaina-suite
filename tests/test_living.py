@@ -127,6 +127,7 @@ BASE_CFG = {
     "living_cooldown_minutes": 180,
     "living_daily_max": 6,
     "living_quiet_hours": "off",
+    "living_sleep_aware": False,
     "living_offset_min": 5,
     "living_offset_max": 45,
     "living_ramp_minutes": 240,

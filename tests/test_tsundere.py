@@ -66,6 +66,8 @@ BASE = {
     "tsundere_review_enabled": True,
     "tsundere_encrypt_negative": True,
     "tsundere_max_retry": 1,
+    # v1.11.0：生成文案里的「多久没聊」不随运行时刻变化
+    "living_sleep_aware": False,
 }
 
 

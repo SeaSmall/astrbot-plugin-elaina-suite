@@ -64,6 +64,8 @@ BASE = {
     "affect_inject_chars": 600,
     "affect_baseline": "0.15,0.25,0.70",
     "affect_primary_user_id": "",
+    # v1.11.0：断言与运行时刻解耦，睡眠豁免由 test_sleep_aware.py 单独覆盖
+    "affect_sleep_hours": "off",
 }
 
 
