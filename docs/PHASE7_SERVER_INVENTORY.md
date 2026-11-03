@@ -147,7 +147,7 @@ sudo ls -laR /opt/astrbot/data/plugin_data/astrbot_plugin_affection   # 合计 6
 | bot_id 子目录 | self_data.json | user_data.json | user_data mtime(UTC) | 用户数 |
 | --- | --- | --- | --- | --- |
 | `<qq3>` | 219 B | 1 034 B | 2026-08-09 08:17 | 3 |
-| `541E6A92A03718EDBB9946C748642854` | 195 B | 735 B | 2026-09-13 01:02 | 2 |
+| `<bot_id_hash>` | 195 B | 735 B | 2026-09-13 01:02 | 2 |
 | `default_bot` | —（空目录） | — | 2026-08-07 14:52 | 0 |
 | `qq_official` | 220 B | 762 B | 2026-09-29 23:54 | 2 |
 | `unknown_selfid` | 218 B | 754 B | **2026-10-29 10:32** | 2 |
