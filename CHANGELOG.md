@@ -864,3 +864,70 @@ AstrBot 工作区里的 `user_profile.md`（形如 `<data>/workspaces/<会话>/u
   若想完全保持旧行为，把这两个开关关掉，或把 `*_sleep_hours` 填 `off`。
 - 睡眠窗口请与 `pg_timezone` 一致；情感侧优先读 `affect_sleep_hours`，其次
   `living_sleep_hours`，最后 `living_quiet_hours`——设置一处即可，不必两边重复填。
+
+## v1.12.0（2026-11-09）
+
+### ✨ 智能分段（合并 astrbot_plugin_smart_segmentation）
+
+- 新增 `SegmentCore`：`on_decorating_result` 时把一条长回复切 2~N 段，前 N-1 段用
+  `event.send` **在本轮请求内即时发出**，末段留在 `result.chain` 交给管线。
+- 修掉原插件的「消息另存、突然爆发」：它把后续段留到 `after_message_sent` 之后用
+  `context.send_message` 补发，此时 webchat 的 back_queue 已被移除，适配器把消息当
+  「主动消息」写进 `platform_message_history`（`webchat_adapter.py::send_by_session`），
+  前端收不到，等用户下次说话拉历史时一次性蹦出。新实现不落库、不起后台任务、不跨轮补发。
+- 切分策略：按句读分组、短句不单独成条、单段过长在逗号处再切一刀、段数受
+  `segment_max_segments` 约束；任一段发送失败时剩余内容并回末段，**绝不丢字**。
+- 配置（9 项）：`segment_enabled` / `segment_inline_send` / `segment_max_segments` /
+  `segment_min_chars` / `segment_max_chars` / `segment_delay_base` /
+  `segment_delay_per_char` / `segment_delay_max` / `segment_style`。
+- 配套部署：关闭 AstrBot 内置 `platform_settings.segmented_reply`（正则逐句 + 随机
+  1.5~3.5s 间隔是碎片化的另一半原因），删除 `astrbot_plugin_smart_segmentation`。
+
+### ✨ 说话连贯（人格层）
+
+- `assets/persona.json` 新增 `coherence`（4 条 rules / 5 条 forbidden / segment_rule），
+  `tone.length_rule.second_sentence` 改为「两句必须语义承接」。
+- 人格底稿新增 `· 连贯` 段（`persona_coherence_enabled`，默认开），铁律注入
+  `prohibitions[:8]` → `[:9]`（补回 p09「必须是伊蕾娜会说的话」）。
+- 主动消息模板新增「接得上」要求：先接住上面提到的那件事或对方刚说的话，再往下说。
+
+### 🧪 测试
+
+- 新增 `tests/test_segment.py`（S1–S10）：保序不丢字、段数上限、短文本不分段、
+  conservative 风格、短句合并不单独成条、即时发送顺序、发送失败回退、非纯文本/错误文案跳过、
+  停顿边界、结构约束（无 `@filter.after_message_sent`、无 `context.send_message` 补发、
+  配置键齐全 169）。
+- 原有 9 个测试文件全部通过（merged / living / affect / memory / motivation / tsundere /
+  global / sleep_aware / grounded_intent）。
+
+### ⚙️ 升级注意
+
+- 面板 159 → 169 项；`segment_*` 全开即用，关闭后与旧版行为完全一致。
+- 若你之前装着 `astrbot_plugin_smart_segmentation`，请**先删掉它**再重启：
+  两套分段会叠加（外部插件仍会在后台补发、仍会落库）。
+- 建议同时关闭 AstrBot 内置分段回复（WebUI → 平台设置 → 分段回复），否则内置正则还会
+  把每段再切成句、并加 1.5~3.5s 随机间隔。
+
+## v1.12.1（2026-11-09）
+
+### 🐛 修「回复被硬切成半句」
+
+- 现状：webchat 请求默认 `enable_streaming=True`（`core/platform/sources/webchat/request_flags.py`），
+  当上游不支持流式时 AstrBot 走 `realtime_segmenting`——把最终文本按长度硬切、
+  逐条推给前端，切点常落在词中间（实测「上午整理备 / 忘，下午炖 / 了菜等你」）。
+  同时该结果的 `result_content_type` 是 `STREAMING_FINISH`，`is_model_result()` 返回
+  False，本插件的分段钩子被直接跳过（日志里看不到 `[segment]`）。
+- 修法：在消息处理器里（`StarRequestSubStage`，早于 LLM 请求）把
+  `event.set_extra("enable_streaming", False)`，回复回到「一条完整结果」，再由
+  `SegmentCore` 按句读切成有意为之的 2~N 条。
+  - 为什么不用 `@filter.on_waiting_llm_request`：该事件在本版本管线里不触发；
+    `OnLLMRequestEvent` 又晚于流式决策（`agent_sub_stages/internal.py:170` 先读 extra）。
+- 新配置 `segment_disable_streaming`（默认开）：关掉即恢复原流式行为。
+- 实测：真机 `[segment] 分段发送：共 2 段（即时 1 段 + 末段 13 字，累计 1 次）`，
+  WS 侧看到 2 条完整气泡、间隔约 2.7s；此前是 14 个碎片。
+
+### 🧪 测试
+
+- `tests/test_segment.py` 新增 S11（只在分段开启且未禁用时才关流式），S10 配置键数 169 → 170；
+  stub 补 `on_waiting_llm_request`/`on_message` 相关注册。
+- 十个测试文件全部通过。

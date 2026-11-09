@@ -40,5 +40,9 @@ def on_decorating_result(**kw):
     return _register("decorating_result", **kw)
 
 
+def on_waiting_llm_request(**kw):
+    return _register("waiting_llm_request", **kw)
+
+
 def command(name, alias=None):
     return _register("command", command=name, alias=alias)

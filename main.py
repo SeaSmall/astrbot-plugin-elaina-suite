@@ -623,6 +623,7 @@ LIVING_PROMPT_TEMPLATE = """{persona_block}
 - 铁律（不许违反）：涉及「上次说过的事 / 你之前提过的」时，只能引用【你确实记得的事】里写明的
   内容，一个字都不许扩写、拼接或替换成别的事；那里没有具体由头，就不许假装记得某件具体的事，
   改成不指名细节的关心或分享，绝不可以自己编一个「那个事」。
+- 接得上：先接住上面提到的那件事、或对方刚说过的话，再往下说；不另起一件不相干的事，也不推翻自己上一句的结论。
 """
 
 
@@ -5167,6 +5168,16 @@ class ProactiveGuardCore(_PluginCoreBase):
         if tone_bits:
             lines.append("· 说话：" + "；".join(tone_bits))
 
+        # 阶段十一：连贯约束——「前言不搭后语」不是语气问题，是每句话都在另起话题。
+        if self._cfg_bool("persona_coherence_enabled", True):
+            coh = p.get("coherence") if isinstance(p.get("coherence"), dict) else {}
+            coh_rules = [str(x).strip() for x in (coh.get("rules") or []) if str(x).strip()]
+            coh_bad = [str(x).strip() for x in (coh.get("forbidden") or []) if str(x).strip()]
+            if coh_rules:
+                lines.append("· 连贯：" + "；".join(coh_rules[:4]))
+            if coh_bad:
+                lines.append("· 不要：" + "、".join(coh_bad[:5]))
+
         habits = [h for h in (p.get("speech_habits") or []) if isinstance(h, dict)]
         habit_bits = []
         for h in habits[:5]:
@@ -5197,7 +5208,7 @@ class ProactiveGuardCore(_PluginCoreBase):
             if rule:
                 rules.append(rule)
         if rules:
-            lines.append("· 铁律：" + "；".join(rules[:8]))
+            lines.append("· 铁律：" + "；".join(rules[:9]))
 
         text = chr(10).join(lines)
         cap = max(400, self._cfg_int("persona_inject_chars", 2400))
@@ -8712,6 +8723,234 @@ class SystemHealthCore(_PluginCoreBase):
 
 
 # ===========================================================================
+# 核心十：智能分段（合并 astrbot_plugin_smart_segmentation，并修掉它的补发 bug）
+# ===========================================================================
+class SegmentCore(_PluginCoreBase):
+    """把一条长回复切成 2~N 条短消息，并在**本轮请求还没结束**时依次发出。
+
+    原插件 astrbot_plugin_smart_segmentation 的做法是：首段照常走管线，其余段登记到
+    _pending_follow_ups，等 after_message_sent 之后用 context.send_message 补发。
+    但 AstrBot 的 webchat 适配器（webchat_adapter.py::send_by_session）只有在会话还有
+    活跃 back_queue 时才把消息推给前端；请求结束后队列已被移除，补发的消息被当成
+    「主动消息」写进 platform_message_history —— 前端收不到，等用户下次说话、前端重新
+    拉历史时才一次性蹦出来（就是「另存在一个地方、突然冒出一大堆」）。
+
+    这里改成：在 on_decorating_result 里就把 N 段算好，前 N-1 段用 event.send 当场发出
+    （请求还开着，走正常回包通道，前端立刻看到），最后一段留在 result.chain 交给管线。
+    全程不落库、不起后台任务、不跨轮补发，因此也不会与主动消息门禁打架。
+    """
+
+    _SENT_RE = re.compile(r"[^。！？!?…~～\n]+[。！？!?…~～]*")
+    _COMMA = "，,、；;：:"
+
+    def __init__(self, owner: "ElainaSuitePlugin") -> None:
+        super().__init__(owner)
+        self._total = 0
+
+    # ---------------------------- 配置 ---------------------------- #
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        v = self.config.get(key, default)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        try:
+            return float(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _cfg_str(self, key: str, default: str = "") -> str:
+        val = self.config.get(key)
+        if val is None:
+            return default
+        return str(val).strip() or default
+
+    def _on(self) -> bool:
+        return self._cfg_bool("segment_enabled", True)
+
+    @property
+    def enabled(self) -> bool:
+        return self._on()
+
+    # ---------------------------- 切分 ---------------------------- #
+    @classmethod
+    def _split_long(cls, seg: str, limit: int) -> list:
+        """单句过长时在逗号处再切一刀；切不动就原样返回（不硬切）。"""
+        seg = (seg or "").strip()
+        if len(seg) <= limit:
+            return [seg] if seg else []
+        out = []
+        rest = seg
+        while len(rest) > limit:
+            cut = -1
+            for i, ch in enumerate(rest[: limit + 1]):
+                if ch in cls._COMMA:
+                    cut = i
+            # 切口太靠前会把「嗯，」切出来，宁可留着
+            if cut <= 0 or cut < limit * 0.35:
+                break
+            out.append(rest[: cut + 1].strip())
+            rest = rest[cut + 1:].lstrip()
+        if rest.strip():
+            out.append(rest.strip())
+        return [s for s in out if s]
+
+    def split(self, text: str) -> list:
+        """按句读切分；返回至少 1 段。段数受 segment_max_segments 限制。"""
+        raw = (text or "").strip()
+        if not raw:
+            return []
+        min_chars = max(4, self._cfg_int("segment_min_chars", 14))
+        max_chars = max(12, self._cfg_int("segment_max_chars", 60))
+        max_segs = max(2, min(6, self._cfg_int("segment_max_segments", 3)))
+        style = self._cfg_str("segment_style", "natural").lower()
+        if len(raw) < min_chars * 2:
+            return [raw]
+        sents = [s.strip() for s in self._SENT_RE.findall(raw) if s.strip()]
+        if len(sents) <= 1:
+            return [raw]
+
+        # 按目标段长把句子分组：段数 = ceil(总长 / 理想段长)，受 max_segs 约束。
+        # 这样既能避免「嗯。」单独成条，也不会把所有句子糊成一段。
+        ideal = max(8, int(min_chars * 1.8))
+        n = max(1, min(max_segs, -(-len(raw) // ideal)))
+        if n <= 1:
+            return [raw]
+        target = len(raw) / n
+        merged = []
+        cur = ""
+        for i, s in enumerate(sents):
+            cur += s
+            left = n - 1 - len(merged)
+            rest = len(sents) - i - 1
+            if left > 0 and len(cur) >= target and rest >= left:
+                merged.append(cur)
+                cur = ""
+        if cur:
+            merged.append(cur)
+        # 极短的首/尾段并到邻段，避免「嗯。」单独成条
+        if len(merged) > 1 and len(merged[0]) < 4:
+            merged[1] = merged[0] + merged[1]
+            merged.pop(0)
+        if len(merged) > 1 and len(merged[-1]) < 4:
+            merged[-2] += merged[-1]
+            merged.pop()
+
+        if len(merged) > max_segs:
+            merged = merged[: max_segs - 1] + ["".join(merged[max_segs - 1:])]
+        merged = [s for s in merged if s]
+        return merged if len(merged) > 1 else [raw]
+
+    def _delay(self, seg: str) -> float:
+        base = self._cfg_float("segment_delay_base", 0.45)
+        per = self._cfg_float("segment_delay_per_char", 0.02)
+        cap = max(0.0, self._cfg_float("segment_delay_max", 1.5))
+        return max(0.0, min(cap, base + per * len(seg or "")))
+
+    # ---------------------------- 钩子 ---------------------------- #
+    async def on_message(self, event) -> None:
+        """关掉本次请求的流式输出。
+
+        webchat 的请求默认带 ``enable_streaming=True``（见
+        ``core/platform/sources/webchat/request_flags.py``），而当模型/上游不支持
+        流式时，AstrBot 用 ``realtime_segmenting`` 策略把最终文本按长度硬切成
+        若干块逐条推送 —— 前端看到的就是「半句一个气泡、前后不搭」。
+
+        ``agent_sub_stages/internal.py`` 在读这个 extra 时，StarRequestSubStage
+        （插件消息处理器）**还没跑完**，所以只有在这里、在 LLM 请求真正发起之前
+        置 False 才生效；``OnLLMRequestEvent`` 已经太晚。
+        """
+        if not self._on():
+            return
+        if not self._cfg_bool("segment_disable_streaming", True):
+            return
+        try:
+            event.set_extra("enable_streaming", False)
+        except Exception:
+            pass
+
+    async def on_decorating_result(self, event) -> None:
+        """发送前把长回复切成多条，前 N-1 条当场发，末段交给管线。"""
+        if not self._on():
+            return
+        if not self._cfg_bool("segment_inline_send", True):
+            return
+        if str(event.get_extra("_elaina_segment_done") or "") == "1":
+            return
+        segs: list = []
+        try:
+            result = event.get_result()
+            if result is None:
+                return
+            is_model = getattr(result, "is_model_result", None)
+            if callable(is_model) and not is_model():
+                return
+            chain = list(getattr(result, "chain", []) or [])
+            if len(chain) != 1 or not isinstance(chain[0], Plain):
+                return
+            text = str(getattr(chain[0], "text", "") or "")
+            if not text.strip():
+                return
+            guard = getattr(self.owner, "llm_guard", None)
+            if guard is not None and getattr(guard, "enabled", False):
+                try:
+                    if guard.match_reason(text):
+                        return
+                except Exception:
+                    pass
+            segs = self.split(text)
+            if len(segs) < 2:
+                return
+            event.set_extra("_elaina_segment_done", "1")
+            result.chain = [Plain(segs[-1])]
+
+            ok = 0
+            for seg in segs[:-1]:
+                try:
+                    await asyncio.sleep(self._delay(seg))
+                    await event.send(MessageChain([Plain(seg)]))
+                    ok += 1
+                except Exception as e:
+                    logger.warning(f"[segment] 第 {ok + 1} 段发送失败，剩余并回末段: {e}")
+                    break
+            if ok < len(segs) - 1:
+                # 有段没发出去：并回末段，宁可少一个气泡也不能丢字
+                result.chain = [Plain("".join(segs[ok:]))]
+            self._total += 1
+            logger.info(
+                f"[segment] 分段发送：共 {len(segs)} 段（即时 {ok} 段 + 末段 {len(segs[-1])} 字，"
+                f"累计 {self._total} 次）"
+            )
+        except Exception as e:
+            logger.warning(f"[segment] 分段失败，退回整条发送: {e}")
+            try:
+                result = event.get_result()
+                if result is not None and segs:
+                    result.chain = [Plain("".join(segs))]
+            except Exception:
+                pass
+
+    def status(self) -> dict:
+        return {
+            "enabled": self._on(),
+            "inline_send": self._cfg_bool("segment_inline_send", True),
+            "max_segments": self._cfg_int("segment_max_segments", 3),
+            "min_chars": self._cfg_int("segment_min_chars", 14),
+            "max_chars": self._cfg_int("segment_max_chars", 60),
+            "style": self._cfg_str("segment_style", "natural"),
+            "disable_streaming": self._cfg_bool("segment_disable_streaming", True),
+            "total": self._total,
+        }
+
+
+# ===========================================================================
 # 主插件类：AstrBot 只注册一个 Star 类（ElainaSuitePlugin），
 # 持有 6 个功能核心实例并负责事件/指令/LLM 钩子的路由。
 # ===========================================================================
@@ -8733,6 +8972,7 @@ class ElainaSuitePlugin(Star):
         self.meme = ElainaMemeCore(self)
         self.llm_guard = LlmGuardCore(self)
         self.system_health = SystemHealthCore(self)
+        self.segment = SegmentCore(self)
         # 启动就补齐中文字体：图片渲染走本地 PIL 时全靠它
         _ensure_cjk_font()
 
@@ -8793,6 +9033,8 @@ class ElainaSuitePlugin(Star):
         except Exception:
             sender_id = ""
         self.affect.note_user(event.unified_msg_origin, user_id=sender_id)
+        # 必须在 LLM 请求发起前把流式关掉（否则会被 realtime_segmenting 切成半句）
+        await self.segment.on_message(event)
 
     # ------------------------------------------------------------------ #
     # LLM 钩子路由
@@ -8854,6 +9096,11 @@ class ElainaSuitePlugin(Star):
     async def llm_guard_on_decorating_result(self, event: AstrMessageEvent):
         """LLM 拦截兜底：发送前拦截被泄漏的错误文案并按配置替换/丢弃。"""
         await self.llm_guard.on_decorating_result(event)
+
+    @filter.on_decorating_result(priority=99990)
+    async def segment_on_decorating_result(self, event: AstrMessageEvent):
+        """智能分段：把长回复切成多条即时气泡（替代外部 smart_segmentation 插件）。"""
+        await self.segment.on_decorating_result(event)
 
     # ------------------------------------------------------------------ #
     # 指令路由

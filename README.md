@@ -45,6 +45,15 @@ MiMo 默认模型为 **`mimo-v2.6-flash`**（V2.6 系列，2026-09-22 发布；�
 > 🆕 **记忆源归一（阶段十 · Mem0 是唯一记忆源，`mem0_enabled`）**：插件里曾同时存在三套记忆——KV 里的 AI 摘要、工作区 `user_profile.md` 用户笔记、Mem0 向量记忆，于是出现「AI 用的是 A 份、`/记忆` 显示的是 B 份」。现在只保留 Mem0：**写入**（用户+助手配成一轮批量写）、**召回**（生成前检索注入【你记得的事】）、**展示**（`/记忆` 直接列 Mem0 条目）、**水位**（计划是否基于旧记忆，按 Mem0 最后一次成功写入时间判断）。scope 全插件唯一：填了 `shared_scope_id` 就用它（QQ 与语音是同一个人），否则固定 `owner`，**代码里不存在按会话派生 user_id 的路径**。启动时会把旧版散落在多个 user_id 下的 Mem0 条目自动合并进唯一 scope（`mem0_migrate_legacy`，幂等，失败只记日志）；KV 摘要 / 用户笔记 / 裸历史回退三条链路已整体删除。`/刷新记忆` 立即把缓冲区写进 Mem0，`/记忆重置` 只清这一个 scope 并重播 34 条世界观。全链路报告（情感全局化 / 记忆源归一 / 服务器清理前后数字）见 [`docs/PHASE7_REPORT.md`](docs/PHASE7_REPORT.md)。
 > 🆕 **写入前提炼事实（阶段十补充 · `mem0_distill`，默认开启）**：`infer=False` 直存原文时，mem0 会把「蛙趣?」「你好啊」这类寒暄也当成记忆（实测 56 条里 22 条是原句）。现在写入前先用**对话模型**把最近几轮压成 1~3 条「关于用户的事实」（第三人称、每条 ≤40 字、没有值得记的就输出 NONE），再逐条写入 Mem0；没有事实时整轮跳过、**不退回存原文**。日志 `[memory] 从 N 条消息提炼出 M 条事实` / `[memory] 本轮未提炼出值得长期记住的事实`。这是插件侧实现，不依赖 mem0 自带的 LLM 抽取（那个要独立 key，服务器上实测 `LLM extraction failed: Could not resolve authentication method`）。关掉 `mem0_distill` 即回到「原样存对话」。
 
+> 🆕 **说话连贯（阶段十一 · `persona_coherence_enabled`，默认开启）**：针对「AI 说话前言不搭后语」，人格层加了一条**连贯约束**——每条回复先接住对方这一句再往下说、几条之间不跳话题不复读不推翻上一句、短句也要能独立读懂、换话题先给一句过渡；`assets/persona.json` 里新增 `coherence.rules / forbidden`，人格底稿多出一段 `· 连贯`，主动消息模板也多一条「接得上」铁律，铁律注入从 `prohibitions[:8]` 放宽到 `[:9]`（补回 p09「必须是伊蕾娜会说的话」）。
+
+> 🆕 **智能分段（阶段十一 · 合并 `astrbot_plugin_smart_segmentation`，`segment_enabled`，默认开启）**：一条长回复按句读切成 2~N 条**即时气泡**，段间停顿随字数（`segment_delay_base` + `segment_delay_per_char`，封顶 `segment_delay_max`）。
+> ⚠️ 这不只是把外部插件抄进来：原插件把第 2..N 段留到 `after_message_sent` 之后用 `context.send_message` 补发，而 AstrBot 的 webchat 适配器（`send_by_session`）在请求结束、back_queue 被移除后，会把这种发送判定成**主动消息写进 `platform_message_history`**——前端收不到，等用户下次说话、前端重新拉历史时才一次性冒出一大堆（就是「另存在一个地方、突然蹦出来」）。
+> 还有一处必须一起改：webchat 的请求默认带 `enable_streaming=True`，而当前上游不支持流式时 AstrBot 会用 `realtime_segmenting` 把**最终文本按长度硬切**成若干块逐条推送（切点常常落在词中间，看起来就是「半句一个气泡」）。本插件在消息进入时就把它置 False（`segment_disable_streaming`，默认开），回复先合成一条完整结果再交给分段核心。AstrBot 里 `OnLLMRequestEvent` 触发得太晚（流式决策在 `agent_sub_stages/internal.py` 读 extra 时就做完了），所以只能挂在消息处理器上。
+>
+> 本插件的做法是：在 `on_decorating_result` 里就把 N 段算好，前 N-1 段用 `event.send` **当场**发出（请求还开着，走正常回包通道），最后一段留在 `result.chain` 交给管线；**不起后台任务、不跨轮补发、不落库**，因此也不会与主动消息门禁打架。任一段发送失败时，剩余内容并回末段，绝不丢字。
+> 配套：服务器上应**关掉 AstrBot 内置的 `platform_settings.segmented_reply`**（它按正则 `.*?[。？！~…]+` 每句一条、随机 1.5~3.5s 间隔，是「碎片化」的另一半原因），并**删除** `astrbot_plugin_smart_segmentation` 插件目录，避免两套分段叠加。
+
 > 🆕 **人格常驻注入（阶段七 · 插件自带人格，`persona_inject_enabled`，默认开启）**：以前「像不像伊蕾娜」取决于服务器上那份 persona 配得怎么样；现在插件自己把 `assets/persona.json` 压成约 1140 字的 `【身份底稿：你是伊蕾娜（灰之魔女）】`——身份（物种/出身/年龄/外貌/自称/禁自称）、性格（前 6 条特质）、说话（译腔 + 「一条回复最多 25 字、默认 1 句、最多 2 句」这类硬约束 + 句尾语气词）、习惯、关系、铁律六段——在**每次** LLM 请求时追加到 system prompt 末尾（不覆盖原提示词，先人格底稿再傲娇写法，两段各自幂等、可分别关闭）。真机实测：从本地语音通道（`webchat_phone` 会话）发消息，日志出现 `[persona] 已向对话 system prompt 注入插件人格（1140 字）`，回复自动带傲娇短句。长度上限 `persona_inject_chars`（默认 2400）。
 
 > 🆕 **傲娇表达（阶段五 · 三条行为路径 + 零容忍元话语，`tsundere_enabled`，默认开启）**：傲娇不再被写成可以直接说出口的标签
@@ -79,8 +88,8 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## 🧩 兼容性设计（为什么能全部一起用）
 
-- **单一 Star 类 + 7 个功能核心**：AstrBot 一个插件目录只注册一个 Star 类，因此本插件用
-  `ElainaSuitePlugin` 持有 7 个核心（ImageBridge / DailyDigest / ProactiveGuard / LivingMemory / ElainaMeme / LlmGuard / SystemHealth），
+- **单一 Star 类 + 8 个功能核心**：AstrBot 一个插件目录只注册一个 Star 类，因此本插件用
+  `ElainaSuitePlugin` 持有 8 个核心（ImageBridge / DailyDigest / ProactiveGuard / LivingMemory / ElainaMeme / LlmGuard / SystemHealth / Segment），
   由它统一路由事件、指令与 LLM 钩子，核心间无重复注册。
 - **配置键按模块加前缀**，彻底避免撞键：
 
@@ -103,7 +112,7 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 
 ## ⚙️ 配置说明（按模块）
 
-配置面板里共 159 项，按前缀分组：
+配置面板里共 170 项，按前缀分组：
 
 - **图片桥接**：`xiaomi_api_key` / `xiaomi_base_url` / `xiaomi_model` / `baidu_api_key` / `baidu_secret_key` / `ocr_api_url` / `ocr_api_key` / `ocr_language` / `ocr_timeout` / `pending_ttl` / `recognition_wait_timeout` / `emoji_wait_pending` / `prompt_template`
 - **每日简报**：`send_cron` / `digest_timezone` / `send_deadline` / `weather_city`（多城市）/ `weather_enabled` / `weather_cache_minutes` / `weather_interval_seconds` / `news_cn_enabled` / `news_intl_enabled` / `tech_enabled` / `ai_enabled` / `security_enabled` / `medical_enabled` / `policy_enabled` / `github_trending_enabled` / `github_trending_days` / `github_trending_count` / `github_trending_min_stars` / `max_items_per_section` / `ai_summary_enabled` / `digest_send_mode` / `digest_long_threshold` / `digest_also_send_md` / `digest_target_sessions` / `gov_policy_recent_days` / `ai_recent_days` / `security_recent_days` / `security_kev_days` / `feeds_cn` / `feeds_intl` / `feeds_tech` / `feeds_ai` / `feeds_security` / `feeds_medical` / `feeds_policy` / `llm_prompt`
@@ -111,7 +120,8 @@ https://github.com/SeaSmall/astrbot-plugin-elaina-suite
 - **主动消息 v2（阶段一）**：`living_enabled` / `living_min_silence_minutes` / `living_cooldown_minutes` / `living_daily_max` / `living_quiet_hours` / `living_sleep_aware` / `living_sleep_hours` / `living_offset_min` / `living_offset_max` / `living_ramp_minutes` / `living_decision_check_minutes` / `living_persona_chars` / `living_worldview_chars`
 - **长期记忆（阶段二/十 · mem0 唯一源）**：`mem0_enabled` / `mem0_llm_model` / `mem0_llm_base_url` / `mem0_llm_api_key` / `mem0_embed_model` / `mem0_top_k` / `mem0_threshold_pct` / `mem0_seed_facts` / `mem0_flush_turns` / `mem0_recall_chars` / `mem0_infer` / `mem0_distill` / `mem0_affect_recall` / `mem0_affect_boost_pct` / `mem0_unresolved_boost_pct` / `mem0_migrate_legacy`
 - **动机与注意力（阶段四 · GWA 竞争 + 内在动机）**：`motivation_enabled` / `motivation_affect_gate` / `motivation_learning_gate` / `motivation_topic_max` / `motivation_topic_chars` / `motivation_engage_window_minutes` / `motivation_select_noise` / `motivation_loser_decay`
-- **人格常驻注入（阶段七）**：`persona_inject_enabled` / `persona_inject_chars`
+- **人格常驻注入（阶段七 / 十一）**：`persona_inject_enabled` / `persona_inject_chars` / `persona_coherence_enabled`
+- **智能分段（阶段十一）**：`segment_enabled` / `segment_inline_send` / `segment_max_segments` / `segment_min_chars` / `segment_max_chars` / `segment_delay_base` / `segment_delay_per_char` / `segment_delay_max` / `segment_style` / `segment_disable_streaming`
 - **跨会话共享（阶段八）**：`shared_scope_enabled` / `shared_scope_id`
 - **傲娇表达（阶段五 · 三路径 + 审校）**：`tsundere_enabled` / `tsundere_review_enabled` / `tsundere_encrypt_negative` / `tsundere_max_retry` / `tsundere_chat_inject`
 - **情感状态（阶段三/九 · Sentipolis PAD，全局单例）**：`affect_enabled` / `affect_fast_mode` / `affect_decay_half_life_minutes` / `affect_silence_threshold_minutes` / `affect_silence_check_minutes` / `affect_silence_cooldown_minutes` / `affect_silence_target` / `affect_reflect_poignancy` / `affect_slow_delta_cap` / `affect_inject_chars` / `affect_baseline` / `affect_primary_user_id` / `affect_sleep_aware` / `affect_sleep_hours`

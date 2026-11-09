@@ -850,5 +850,80 @@
     "type": "bool",
     "default": true,
     "description": "【记忆】启动时把旧版分散在多个 user_id 下的 Mem0 记忆合并进唯一 scope（幂等，可重复跑）"
+  },
+  "persona_coherence_enabled": {
+    "type": "bool",
+    "description": "【人格】启用连贯约束（先接住对方这句、不跳话题、不复读、不半句成条）",
+    "default": true
+  },
+  "segment_enabled": {
+    "type": "bool",
+    "description": "【智能分段】把一条长回复切成 2~N 条气泡（合并原 smart_segmentation 插件）",
+    "default": true
+  },
+  "segment_inline_send": {
+    "type": "bool",
+    "description": "[智能分段] 在本轮请求内即时发送前面的分段（关掉则只切链、由管线一次发）",
+    "default": true
+  },
+  "segment_max_segments": {
+    "type": "int",
+    "description": "[智能分段] 最多切成几段（2-6）",
+    "default": 3,
+    "slider": {
+      "min": 2,
+      "max": 6,
+      "step": 1
+    }
+  },
+  "segment_min_chars": {
+    "type": "int",
+    "description": "[智能分段] 每段最少字数，太短的句子会并到下一段",
+    "default": 14,
+    "slider": {
+      "min": 6,
+      "max": 40,
+      "step": 1
+    }
+  },
+  "segment_max_chars": {
+    "type": "int",
+    "description": "[智能分段] 单段上限，超过时在逗号处再切一刀",
+    "default": 60,
+    "slider": {
+      "min": 20,
+      "max": 160,
+      "step": 5
+    }
+  },
+  "segment_delay_base": {
+    "type": "float",
+    "description": "[智能分段] 每段之间的基础停顿（秒）",
+    "default": 0.45
+  },
+  "segment_delay_per_char": {
+    "type": "float",
+    "description": "[智能分段] 每段按字数追加的停顿（秒/字）",
+    "default": 0.02
+  },
+  "segment_delay_max": {
+    "type": "float",
+    "description": "[智能分段] 单次停顿上限（秒）",
+    "default": 1.5
+  },
+  "segment_style": {
+    "type": "string",
+    "description": "[智能分段] 切分风格：natural（句读 + 过长句逗号处再切）/ conservative（只按句末标点）",
+    "default": "natural",
+    "options": [
+      "natural",
+      "conservative"
+    ]
+  },
+  "segment_disable_streaming": {
+    "type": "bool",
+    "description": "分段开启时关闭流式输出",
+    "hint": "webchat 默认流式；当前模型不支持流式时 AstrBot 会把整段回复按长度硬切，看起来就是「半句一个气泡、前后不搭」。开启本项后回复先合成一条完整结果，再由分段核心按句读切成有意为之的 2~N 条。关掉则保留原流式行为。",
+    "default": true
   }
 }
